@@ -78,7 +78,7 @@ class LeastSquares:
 
 
 class CanonicalCorrelationAnalysis:
-    def __init__(self, EEG_list, Stim_list, fs, L_EEG, L_Stim, offset_EEG=0, offset_Stim=0, fold=10, n_components=5, regularization='lwcov', K_regu=None, message=True, signifi_level=True, pool=True, n_permu=1000, p_value=0.05, trials=False, dim_subspace=2):
+    def __init__(self, EEG_list, Stim_list, fs, L_EEG, L_Stim, offset_EEG=0, offset_Stim=0, fold=10, n_components=5, regularization='lwcov', K_regu=None, message=True, signifi_level=True, n_permu=1000, p_value=0.05, dim_subspace=2):
         '''
         EEG_list: list of EEG data, each element is a T(#sample)xDx(#channel) array
         Stim_list: list of stimulus, each element is a T(#sample)xDy(#feature dim) array
@@ -104,10 +104,8 @@ class CanonicalCorrelationAnalysis:
         self.K_regu = K_regu
         self.message = message
         self.signifi_level = signifi_level
-        self.pool = pool
         self.n_permu = n_permu
         self.p_value = p_value
-        self.trials = trials
         self.dim_subspace = dim_subspace
 
     def fit(self, X, Y, V_A=None, V_B=None, Lam=None):
@@ -242,7 +240,13 @@ class CanonicalCorrelationAnalysis:
         F = utils.F_organize(F_redun, self.L_EEG, self.offset_EEG)
         return F
 
-    def cross_val(self):
+    def calculate_sig_corr(self, corr_trials):
+        assert self.n_components*self.n_permu == corr_trials.shape[0]*corr_trials.shape[1]
+        sig_idx = -int(self.n_permu*self.p_value*self.n_components)
+        corr_trials = np.sort(abs(corr_trials), axis=None)
+        return corr_trials[sig_idx]
+
+    def cross_val(self, trial_len=None):
         fold = self.fold
         n_components = self.n_components
         corr_train = np.zeros((fold, n_components))
@@ -255,31 +259,19 @@ class CanonicalCorrelationAnalysis:
             # EEG_train, EEG_test, Sti_train, Sti_test = split(EEG_list, feature_list, fold=fold, fold_idx=idx+1)
             EEG_train, EEG_test, Sti_train, Sti_test = utils.split_balance(self.EEG_list, self.Stim_list, fold=fold, fold_idx=idx+1)
             corr_train[idx,:], tsc_train[idx], dist_train[idx], _, V_A_train, V_B_train, Lam = self.fit(EEG_train, Sti_train)
-            if self.trials:
-                EEG_trials = utils.into_trials(EEG_test, self.fs)
-                Sti_trials = utils.into_trials(Sti_test, self.fs)
+            if trial_len is not None:
+                EEG_trials = utils.into_trials(EEG_test, self.fs, t=trial_len)
+                Sti_trials = utils.into_trials(Sti_test, self.fs, t=trial_len)
                 corr_test[idx,:], tsc_test[idx], dist_test[idx] = self.cal_corr_coe_trials(EEG_trials, Sti_trials, V_A_train, V_B_train)
             else:
                 corr_test[idx,:], tsc_test[idx], dist_test[idx], _, _, _, _ = self.fit(EEG_test, Sti_test, V_A=V_A_train, V_B=V_B_train, Lam=Lam)
         if self.signifi_level:
-            if self.pool:
-                if self.trials:
-                    corr_trials = self.permutation_test_trials(EEG_trials, Sti_trials, V_A=V_A_train, V_B=V_B_train, block_len=1)
-                else:
-                    corr_trials = self.permutation_test(EEG_test, Sti_test, V_A=V_A_train, V_B=V_B_train, Lam=Lam, block_len=1)
-                corr_trials = np.sort(abs(corr_trials), axis=None)
-                sig_idx = -int(self.n_permu*self.p_value*n_components)
-                sig_corr = corr_trials[sig_idx]
-                print('Significance level: {}'.format(sig_corr))
+            if trial_len is not None:
+                corr_trials = self.permutation_test_trials(EEG_trials, Sti_trials, V_A=V_A_train, V_B=V_B_train, block_len=1)
             else:
-                if self.trials:
-                    corr_trials = self.permutation_test_trials(EEG_trials, Sti_trials, V_A=V_A_train, V_B=V_B_train, block_len=20*self.fs)
-                else:
-                    corr_trials = self.permutation_test(EEG_test, Sti_test, V_A=V_A_train, V_B=V_B_train, Lam=Lam, block_len=20*self.fs)
-                corr_trials = np.sort(abs(corr_trials), axis=0)
-                sig_idx = -int(self.n_permu*self.p_value)
-                sig_corr = corr_trials[sig_idx,:]
-                print('Significance level of each component: {}'.format(sig_corr))
+                corr_trials = self.permutation_test(EEG_test, Sti_test, V_A=V_A_train, V_B=V_B_train, Lam=Lam, block_len=1)
+            sig_corr = self.calculate_sig_corr(corr_trials)
+            print('Significance level: {}'.format(sig_corr))
         else:
             sig_corr = None
         if self.message:
@@ -287,28 +279,94 @@ class CanonicalCorrelationAnalysis:
             print('Average correlation coefficients of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
         return corr_train, corr_test, sig_corr, tsc_train, tsc_test, dist_train, dist_test, V_A_train, V_B_train
 
-    def match_mismatch(self, trial_len, rerank=True):
+    def match_mismatch(self, trial_len, feat_distract_list=None):
         fold = self.fold
         n_components = self.n_components
         corr_tensor_list = []
-        tsc_mtx_list = []
         for idx in range(fold):
             EEG_train, EEG_test, Sti_train, Sti_test = utils.split_balance(self.EEG_list, self.Stim_list, fold=fold, fold_idx=idx+1)
             _, _, _, _, V_A_train, V_B_train, _ = self.fit(EEG_train, Sti_train)
             EEG_trials = utils.into_trials(EEG_test, self.fs, trial_len)
             Sti_trials = utils.into_trials(Sti_test, self.fs, trial_len)
-            nb_trials = len(Sti_trials)
-            corr_tensor = np.zeros((nb_trials, nb_trials, n_components))
-            tsc_mtx = np.zeros((nb_trials, nb_trials))
-            for i in range(nb_trials):
-                for j in range(nb_trials):
-                    corr_tensor[i,j,:], tsc_mtx[i,j], _, _ = self.cal_corr_coe(EEG_trials[i], Sti_trials[j], V_A_train, V_B_train)
-                    if rerank:
-                        idx_sort = np.argsort(-corr_tensor[i,j,:])
-                        corr_tensor[i,j,:] = corr_tensor[i,j,idx_sort]
+            if feat_distract_list is not None:
+                _, _, Distract_train, Distract_test = utils.split_balance(self.EEG_list, feat_distract_list, fold=fold, fold_idx=idx+1)
+                Distract_trials = utils.into_trials(Distract_test, self.fs, trial_len) # might be on the screen together with the attended stimulus
+                Distract_trials_extra = utils.into_trials(Distract_train, self.fs, trial_len)
+            else:
+                Distract_trials = []
+                Distract_trials_extra = []
+            Sti_trials = Sti_trials + Distract_trials+Distract_trials_extra
+            nb_eeg_trials = len(EEG_trials)
+            nb_sti_trials = len(Sti_trials)
+            corr_tensor = np.zeros((nb_eeg_trials, nb_sti_trials, n_components))
+            for i in range(nb_eeg_trials):
+                for j in range(nb_sti_trials):
+                    corr_tensor[i,j,:], _, _, _ = self.cal_corr_coe(EEG_trials[i], Sti_trials[j], V_A_train, V_B_train)
             corr_tensor_list.append(corr_tensor)
-            tsc_mtx_list.append(tsc_mtx)
-        return corr_tensor_list, tsc_mtx_list
+        return corr_tensor_list
+
+    def att_or_unatt(self, feat_unatt_list, trial_len, TRAIN_WITH_ATT):
+        corr_att_fold = []
+        corr_unatt_fold = []
+        fold = self.fold
+        for idx in range(fold):
+            EEG_train, EEG_test, Att_train, Att_test = utils.split_balance(self.EEG_list, self.Stim_list, fold=fold, fold_idx=idx+1)
+            _, _, Unatt_train, Unatt_test = utils.split_balance(self.EEG_list, feat_unatt_list, fold=fold, fold_idx=idx+1)
+            if TRAIN_WITH_ATT:
+                _, _, _, _, V_eeg_train, V_feat_train, Lam = self.fit(EEG_train, Att_train)
+            else:
+                _, _, _, _, V_eeg_train, V_feat_train, Lam = self.fit(EEG_train, Unatt_train)
+            if trial_len is not None:
+                EEG_trials = utils.into_trials(EEG_test, self.fs, trial_len)
+                Att_trials = utils.into_trials(Att_test, self.fs, trial_len)
+                Unatt_trials = utils.into_trials(Unatt_test, self.fs, trial_len)
+                corr_att, _, _ = self.cal_corr_coe_trials(EEG_trials, Att_trials, V_eeg_train, V_feat_train, avg=False)
+                corr_unatt, _, _ = self.cal_corr_coe_trials(EEG_trials, Unatt_trials, V_eeg_train, V_feat_train, avg=False)
+                if idx == fold-1 and self.signifi_level:
+                    corr_trials_att = self.permutation_test_trials(EEG_trials, Att_trials, V_A=V_eeg_train, V_B=V_feat_train, block_len=1)
+                    corr_trials_unatt = self.permutation_test_trials(EEG_trials, Unatt_trials, V_A=V_eeg_train, V_B=V_feat_train, block_len=1)
+            else:
+                EEG_trials = EEG_test
+                Att_trials = Att_test
+                Unatt_trials = Unatt_test
+                corr_att, _, _, _ = self.cal_corr_coe(EEG_test, Att_test, V_eeg_train, V_feat_train)
+                corr_unatt, _, _, _ = self.cal_corr_coe(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
+                corr_att = np.expand_dims(corr_att, axis=0)
+                corr_unatt = np.expand_dims(corr_unatt, axis=0)
+                if idx == fold-1 and self.signifi_level:
+                    corr_trials_att = self.permutation_test(EEG_test, Att_test, V_A=V_eeg_train, V_B=V_feat_train, Lam=Lam, block_len=1)
+                    corr_trials_unatt = self.permutation_test(EEG_test, Unatt_test, V_A=V_eeg_train, V_B=V_feat_train, Lam=Lam, block_len=1)
+            if idx == fold-1 and self.signifi_level:
+                sig_corr_att = self.calculate_sig_corr(corr_trials_att)
+                sig_corr_unatt = self.calculate_sig_corr(corr_trials_unatt)
+                print('Significance level (tested on Att): {}'.format(sig_corr_att))
+                print('Significance level (tested on Unatt): {}'.format(sig_corr_unatt))
+            else:
+                sig_corr_att = None
+                sig_corr_unatt = None
+            corr_att_fold.append(corr_att)
+            corr_unatt_fold.append(corr_unatt)
+        corr_att_fold = np.concatenate(tuple(corr_att_fold), axis=0)
+        corr_unatt_fold = np.concatenate(tuple(corr_unatt_fold), axis=0)
+        if self.message:
+            modes = [
+                ("Mode 1: train and test with attended features", corr_att_fold),
+                ("Mode 2: train with attended features and test with unattended features", corr_unatt_fold),
+                ("Mode 3: train and test with unattended features", corr_unatt_fold),
+                ("Mode 4: train with unattended features and test with attended features", corr_att_fold)
+            ]
+            for i, (mode, corr) in enumerate(modes):
+                if TRAIN_WITH_ATT and i > 1:
+                    continue
+                elif not TRAIN_WITH_ATT and i < 2:
+                    continue
+                print(mode)
+                print(np.average(corr, axis=0))
+                # if trial_len is not None:
+                #     print(np.average(np.average(corr, axis=0), axis=0))
+                # else:
+                #     print(np.average(corr, axis=0))
+        return corr_att_fold, corr_unatt_fold, V_eeg_train, V_feat_train, sig_corr_att, sig_corr_unatt
 
 
 class GeneralizedCCA:
@@ -354,7 +412,7 @@ class GeneralizedCCA:
         X_stack: stacked (along axis 2) data of different subjects
         Outputs:
         lam: eigenvalues, related to mean squared error (not used in analysis)
-        W_stack: (rescaled) weights with shape (D*N*n_components)
+        W_stack: (Squared_Error_SIGCCAd) weights with shape (D*N*n_components)
         avg_corr: average pairwise correlation
         '''
         T, D, N = X_stack.shape
