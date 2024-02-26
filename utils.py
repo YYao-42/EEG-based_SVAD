@@ -1,18 +1,14 @@
 import numpy as np
 import random
-import os
 import mne
 import scipy.io
 import matplotlib.pyplot as plt
 import copy
-from sklearn.covariance import LedoitWolf
-from tqdm import tqdm
 from numpy import linalg as LA
 from scipy import signal
 from scipy.linalg import toeplitz, eig, eigh, sqrtm, lstsq
 from scipy.sparse.linalg import eigs
-from scipy.stats import zscore, pearsonr
-from numba import jit
+from scipy.stats import zscore, pearsonr, binomtest, binom
 
 
 def eig_sorted(X, option='descending'):
@@ -46,17 +42,6 @@ def PCAreg_inv(X, rank):
     V = V[:, :rank]
     inv = V @ np.diag(1/lam) @ np.transpose(V)
     return inv
-
-
-def To_posi_semidef(X):
-    '''
-    Transform a symmetric matrix X to a positive semidefinite matrix
-    '''
-    X = (X + X.T) / 2 # make sure X is symmetric
-    lam, V = LA.eig(X)
-    lam = lam + abs(min(lam))
-    X_semiposi_def = V @ np.diag(lam) @ LA.inv(V)
-    return X_semiposi_def
 
 
 def schmidt_orthogonalization(vectors):
@@ -237,59 +222,6 @@ def transformed_GEVD(Dxx, Rxx, rho, dimStim, n_components):
     return lam, W
 
 
-def into_blocks(X, nb_blocks):
-    # Divide tensor into blocks along zeroth axis
-    if X.ndim == 1:
-        X = np.expand_dims(X, axis=1)
-    X_dim = X.shape
-    remainder = X_dim[0] % nb_blocks
-    # discard remainder
-    if remainder > 0:
-        X_dividable = X[:-remainder]
-    else:
-        X_dividable = X
-    blocks = np.split(X_dividable, nb_blocks)
-    return blocks
-
-
-def get_val_set_single(nested_data, fold, fold_val):
-    '''
-    Get validation set from [EEG_i, Vis_i]
-    '''
-    # Get [[EEG_i_fold_1, ...], [Vis_i_fold_1, ...]]
-    nested_fold_list = [into_blocks(mod, fold) for mod in nested_data]
-    # rest_list: [EEG_i_rest, Vis_i_rest] val_list: [EEG_i_val, Vis_i_val]
-    rest_list, val_list, _, _ = split_mm_balance(nested_fold_list, fold_val, fold_idx=fold_val)
-    return rest_list, val_list
-
-
-def get_val_set(nested_datalist, fold, fold_val, crs_val):
-    '''
-    Get validation set from nested data list [[EEG_1, EEG_2, ...], [Vis_1, Vis_2, ...]]
-    Return:
-    nested_restlist: [[EEG_1_rest, EEG_2_rest, ...], [Vis_1_rest, Vis_2_rest, ...]]
-    nested_vallist: [[EEG_1_val, EEG_2_val, ...], [Vis_1_val, Vis_2_val, ...]]
-    rest_list: [EEG_rest, Vis_rest] 
-    val_list: [EEG_val, Vis_val]
-    '''
-    if not crs_val:
-        rest_list, val_list, nested_restlist, nested_vallist = split_mm_balance(nested_datalist, fold_val, fold_idx=fold_val)
-    else:
-        nb_videos = len(nested_datalist[0])
-        nested_restlist = [[],[]]
-        nested_vallist = [[],[]]
-        for i in range(nb_videos):
-            nested_data = [nested_datalist[0][i], nested_datalist[1][i]]
-            rest_list, val_list = get_val_set_single(nested_data, fold, fold_val)
-            nested_restlist[0].append(rest_list[0])
-            nested_restlist[1].append(rest_list[1])
-            nested_vallist[0].append(val_list[0])
-            nested_vallist[1].append(val_list[1])
-        rest_list = [np.concatenate(tuple(mod), axis=0) for mod in nested_restlist]
-        val_list = [np.concatenate(tuple(mod), axis=0) for mod in nested_vallist]
-    return nested_restlist, nested_vallist, rest_list, val_list
-
-
 def into_trials(data, fs, t=60):
     # Divide data into t s trials
     if np.ndim(data)==1:
@@ -410,319 +342,49 @@ def split_mm_balance(nested_datalist, fold=10, fold_idx=1):
     return train_list, test_list, nested_train, nested_test
 
 
-def eval_mm(res_per_fold, component=1):
+def sig_level_binomial_test(p_value, total_trials, p=0.5):
+    critical_value = binom.ppf(1-p_value, total_trials, p=p)
+    critical_value = critical_value+1 if (1 - binom.cdf(critical_value, total_trials, p=p) > p_value) else critical_value # in case ppf returns a value that leads to a closer but larger p-value
+    sig_level = int(critical_value+1)/total_trials
+    return sig_level
+
+
+def eval_mm(res_per_fold, nb_comp_into_account=2):
     nb_folds = len(res_per_fold)
-    nb_trials = res_per_fold[0].shape[0]
-    nb_tests = nb_trials*(nb_trials-1)*nb_folds
-    match_stim_err = 0
-    match_eeg_err = 0
-    for idx in range(nb_folds):
-        if component is not None:
-            mtx_eeg_stim = res_per_fold[idx][:,:,component-1]
-        else:
-            mtx_eeg_stim = res_per_fold[idx] # when using TSC
-        match_stim_mtx = mtx_eeg_stim - np.expand_dims(np.diag(mtx_eeg_stim), axis=1) # Given EEG, match stimulus
-        match_eeg_mtx = mtx_eeg_stim - np.expand_dims(np.diag(mtx_eeg_stim), axis=0)  # Given stimulus, match EEG
-        # count the number of elements that are greater than 0
-        match_stim_err += np.sum(match_stim_mtx > 0)
-        match_eeg_err += np.sum(match_eeg_mtx > 0)
-    match_stim_err /= nb_tests
-    match_eeg_err /= nb_tests
-    return match_stim_err, match_eeg_err
-
-
-def corr_component(X, n_components, W_train=None):
-    '''
-    Inputs:
-    X: EEG data with shape (T, D, N) [T: # sample, D: # channel, N: # subjects]
-    n_components: number of components
-    W_train: If not None, then goes to test mode.
-    Outputs:
-    ISC: inter-subject correlation
-    W: weights
-    '''
-    _, D, N = X.shape
-    Rw = np.zeros([D,D])
-    for n in range(N):
-        Rw += np.cov(np.transpose(X[:,:,n])) # Inside np.cov: observations in the columns
-    Rt = N**2*np.cov(np.transpose(np.average(X, axis=2)))
-    Rb = (Rt - Rw)/(N-1)
-    rank = LA.matrix_rank(Rw)
-    if rank < D:
-        invRw = PCAreg_inv(Rw, rank)
+    res_per_fold = [res[:,:,:nb_comp_into_account] for res in res_per_fold]
+    res_per_fold = [np.max(res, axis=2) for res in res_per_fold]
+    nb_eeg_trials = res_per_fold[0].shape[0]
+    nb_sti_trials = res_per_fold[0].shape[1]
+    if nb_eeg_trials != nb_sti_trials: # with extra distractors
+        for idx in range(nb_folds):
+            for i in range(nb_eeg_trials):
+                res_per_fold[idx][i,i+nb_eeg_trials] = np.inf # Do not consider the distractor that is also on the screen
+        nb_tests = nb_eeg_trials*(nb_sti_trials-2)*nb_folds
     else:
-        invRw = LA.inv(Rw)
-    if W_train is not None: # Test mode
-        W = W_train
-        ISC = np.diag((np.transpose(W)@Rb@W)/(np.transpose(W)@Rw@W))
-    else: # Train mode
-        ISC, W = eig_sorted(invRw@Rb)
-    # TODO: ISC here is an approximation of real average pairwise correlation
-    return ISC[:n_components], W[:,:n_components]
-    
-
-def cano_corr(X, Y, Lx=1, Ly=1, offsetx=0, offsety=0, n_components=5, regularization='lwcov', K_regu=None, V_A=None, V_B=None, Lam=None):
-    '''
-    Input:
-    X: EEG data T(#sample)xDx(#channel)
-    Y: Stimulus T(#sample)xDy(#feature dim)
-    Lx/Ly: If use (spatial-) temporal filter, the number of taps
-    offsetx/offsety: If use (spatial-) temporal filter, the offset of the taps
-    n_components: Number of components to be returned
-    regularization: Regularization of the estimated covariance matrix
-    K_regu: Number of eigenvalues to be kept. Others will be set to zero. Keep all if K_regu=None
-    V_A/V_B: Filters of X and Y. Use only in test mode.
-    '''
-    _, Dx = X.shape
-    _, Dy = Y.shape
-    mtx_X = block_Hankel(X, Lx, offsetx)
-    mtx_Y = block_Hankel(Y, Ly, offsety)
-    if V_A is not None: # Test Mode
-        flag_test = True
-    else: # Train mode
-        flag_test = False
-        # compute covariance matrices
-        covXY = np.cov(mtx_X, mtx_Y, rowvar=False)
-        if regularization=='lwcov':
-            Rx = LedoitWolf().fit(mtx_X).covariance_
-            Ry = LedoitWolf().fit(mtx_Y).covariance_
-        else:
-            Rx = covXY[:Dx*Lx,:Dx*Lx]
-            Ry = covXY[Dx*Lx:Dx*Lx+Dy*Ly,Dx*Lx:Dx*Lx+Dy*Ly]
-        Rxy = covXY[:Dx*Lx,Dx*Lx:Dx*Lx+Dy*Ly]
-        Ryx = covXY[Dx*Lx:Dx*Lx+Dy*Ly,:Dx*Lx]
-        # PCA regularization is recommended (set K_regu<rank(Rx))
-        # such that the small eigenvalues dominated by noise are discarded
-        if K_regu is None:
-            invRx = PCAreg_inv(Rx, LA.matrix_rank(Rx))
-            invRy = PCAreg_inv(Ry, LA.matrix_rank(Ry))
-        else:
-            K_regu = min(LA.matrix_rank(Rx), LA.matrix_rank(Ry), K_regu)
-            invRx = PCAreg_inv(Rx, K_regu)
-            invRy = PCAreg_inv(Ry, K_regu)
-        A = invRx@Rxy@invRy@Ryx
-        B = invRy@Ryx@invRx@Rxy
-        # lam of A and lam of B should be the same
-        # can be used as a preliminary check for correctness
-        # the correlation coefficients are already available by taking sqrt of the eigenvalues: corr_coe = np.sqrt(lam[:K_regu])
-        # or we do the following to obtain transformed X and Y and calculate corr_coe from there
-        Lam, V_A = eig_sorted(A)
-        _, V_B = eig_sorted(B)
-        Lam = np.real(Lam[:n_components])
-        V_A = np.real(V_A[:,:n_components])
-        V_B = np.real(V_B[:,:n_components])
-    X_trans = mtx_X@V_A
-    Y_trans = mtx_Y@V_B
-    corr_pvalue = [pearsonr(X_trans[:,k], Y_trans[:,k]) for k in range(n_components)]
-    corr_coe = np.array([corr_pvalue[k][0] for k in range(n_components)])
-    # P-value-null hypothesis: the distributions underlying the samples are uncorrelated and normally distributed.
-    p_value = np.array([corr_pvalue[k][1] for k in range(n_components)])
-    if not flag_test:
-        # to match filters v_a and v_b s.t. corr_coe is always positive
-        V_A[:,corr_coe<0] = -1*V_A[:,corr_coe<0]
-        corr_coe[corr_coe<0] = -1*corr_coe[corr_coe<0]
-    TSC = np.sum(np.square(corr_coe[:2]))
-    ChDist = np.sqrt(2-TSC)
-    return corr_coe, ChDist, p_value, V_A, V_B, Lam
+        nb_tests = nb_eeg_trials*(nb_sti_trials-1)*nb_folds 
+    match_stim_correct = 0
+    for idx in range(nb_folds):
+        mtx_eeg_stim = res_per_fold[idx]
+        match_stim_mtx = mtx_eeg_stim - np.expand_dims(np.diag(mtx_eeg_stim[:,:nb_eeg_trials]), axis=1) # Given EEG, match stimulus
+        # count the number of elements that are smaller than 0
+        match_stim_correct += np.sum(match_stim_mtx < 0)
+    p_value = binomtest(match_stim_correct, nb_tests, alternative='greater').pvalue
+    acc = match_stim_correct/nb_tests
+    return acc, p_value
 
 
-def Squared_Error(W, Rxx, Dxx, Lam, N, T, rho=0):
-    '''
-    Computes the objective function of (SI)GCCA
-    For GCCA, do not forget to multiply the last block by rho before calling this function
-    '''
-    _, K = W.shape
-    sq_err = (N+rho)*K - 2*T*np.trace(Lam@W.T@Rxx@W) + T*np.trace(W.T@Dxx@W)
-    return sq_err
-
-
-def Squared_Error_GCCA(X, W, Lam, N, DL):
-    '''
-    Computes the objective function of GCCA, by definition
-    '''
-    X_center = copy.deepcopy(X)
-    for n in range(N):
-        X_center[:,n*DL:(n+1)*DL] -= np.mean(X_center[:,n*DL:(n+1)*DL], axis=0)
-    S = X_center@W@Lam
-    sq_err = 0
-    for n in range(N):
-        sq_err += (LA.norm(S - X_center[:,n*DL:(n+1)*DL]@W[n*DL:(n+1)*DL,:]))**2
-    return sq_err
-
-
-def Squared_Error_SIGCCA(X, W, Lam, N, DL, DL_Stim, rho):
-    '''
-    Computes the objective function of SI-GCCA, by definition
-    '''
-    W_rho = copy.deepcopy(W)
-    W_rho[-DL_Stim:,:] = W[-DL_Stim:,:]*rho
-    X_center = copy.deepcopy(X)
-    for n in range(N):
-        X_center[:,n*DL:(n+1)*DL] -= np.mean(X_center[:,n*DL:(n+1)*DL], axis=0)
-    X_center[:, -DL_Stim:] -= np.mean(X_center[:, -DL_Stim:], axis=0)
-    S = X_center@W_rho@Lam
-    sq_err = 0
-    for n in range(N):
-        sq_err += (LA.norm(S - X_center[:,n*DL:(n+1)*DL]@W[n*DL:(n+1)*DL,:]))**2
-    sq_err += rho * (LA.norm(S - X_center[:,-DL_Stim:]@W[-DL_Stim:,:]))**2
-    return sq_err
-
-
-def GCCA(X_stack, L, offset, n_components, regularization='lwcov'):
-    '''
-    LEGACY. USE GCCA_multi_modal INSTEAD.
-    Inputs:
-    X_stack: stacked (along axis 2) data of different subjects
-    n_components: number of components
-    regularization: regularization method when estimating covariance matrices (Default: LedoitWolf)
-    W_train: If not None, then goes to test mode.
-    Outputs:
-    lam: eigenvalues, related to mean squared error (not used in analysis)
-    W_stack: (rescaled) weights with shape (D*N*n_components)
-    avg_corr: average pairwise correlation
-    '''
-    T, D, N = X_stack.shape
-    # From [X1; X2; ... XN] to [X1 X2 ... XN]
-    # each column represents a variable, while the rows contain observations
-    X_list = [block_Hankel(X_stack[:,:,n], L, offset) for n in range(N)]
-    X = np.concatenate(tuple(X_list), axis=1)
-    Rxx = np.cov(X, rowvar=False)
-    Dxx = np.zeros_like(Rxx)
-    for n in range(N):
-        if regularization == 'lwcov':
-            Rxx[n*D*L:(n+1)*D*L, n*D*L:(n+1)*D*L] = LedoitWolf().fit(X[:, n*D*L:(n+1)*D*L]).covariance_
-        Dxx[n*D*L:(n+1)*D*L, n*D*L:(n+1)*D*L] = Rxx[n*D*L:(n+1)*D*L, n*D*L:(n+1)*D*L]
-    lam, W = eigh(Dxx, Rxx, subset_by_index=[0,n_components-1]) # automatically ascend
-    Lam = np.diag(lam)
-    # Right scaling
-    W = W @ sqrtm(LA.inv(Lam.T @ W.T @ Rxx * T @ W @ Lam))
-    # Forward models
-    F_redun = T * Dxx @ W
-    # Reshape W as (DL*n_components*N)
-    W_stack = np.reshape(W, (N,D*L,-1))
-    W_stack = np.transpose(W_stack, [1,0,2])
-    F_redun_stack = np.reshape(F_redun, (N,D*L,-1))
-    F_redun_stack = np.transpose(F_redun_stack, [1,0,2])
-    F_stack = F_organize(F_redun_stack, L, offset, avg=True)
-    return W_stack, F_stack, lam
-
-
-def SI_GCCA(datalist, Llist, offsetlist, n_components, rho, regularization='lwcov'):
-    EEG, Stim = datalist
-    # EEG = EEG/LA.norm(EEG)
-    # Stim = Stim/LA.norm(Stim)
-    if np.ndim(EEG) == 2:
-        EEG = np.expand_dims(EEG, axis=2)
-    T, D_eeg, N = EEG.shape
-    _, D_stim = Stim.shape
-    L_EEG, L_Stim = Llist
-    dim_list = [D_eeg*L_EEG]*N + [D_stim*L_Stim]
-    offset_EEG, offset_Stim = offsetlist
-    EEG_list = [block_Hankel(EEG[:,:,n], L_EEG, offset_EEG) for n in range(N)]
-    EEG_Hankel = np.concatenate(tuple(EEG_list), axis=1)
-    Stim_Hankel = block_Hankel(Stim, L_Stim, offset_Stim)
-    X = np.concatenate((EEG_Hankel, Stim_Hankel), axis=1)
-    Rxx = np.cov(X, rowvar=False)
-    Dxx = np.zeros_like(Rxx)
-    dim_accumu = 0
-    for dim in dim_list:
-        if regularization == 'lwcov':
-            Rxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim] = LedoitWolf().fit(X[:,dim_accumu:dim_accumu+dim]).covariance_
-        Dxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim] = Rxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim]
-        dim_accumu = dim_accumu + dim
-    try:
-        lam, W = transformed_GEVD(Dxx, Rxx, rho, dim_list[-1], n_components)
-        Lam = np.diag(lam)
-        Rxx[:,-D_stim*L_Stim:] = Rxx[:,-D_stim*L_Stim:]*rho
-    except:
-        print("Numerical issue exists for eigh. Use eig instead.")
-        Rxx[:,-D_stim*L_Stim:] = Rxx[:,-D_stim*L_Stim:]*rho
-        lam, W = eig(Dxx, Rxx)
-        idx = np.argsort(lam)
-        lam = np.real(lam[idx]) # rank eigenvalues
-        W = np.real(W[:, idx]) # rearrange eigenvectors accordingly
-        lam = lam[:n_components]
-        Lam = np.diag(lam)
-        W = W[:,:n_components]
-    # Right scaling
-    Rxx[-D_stim*L_Stim:, :] = Rxx[-D_stim*L_Stim:, :]*rho
-    W = W @ sqrtm(LA.inv(Lam.T @ W.T @ Rxx * T @ W @ Lam))
-    # Forward models
-    F = T * Dxx @ W
-    # Organize weights of different modalities
-    Wlist = W_organize(W, datalist, Llist)
-    Flist = W_organize(F, datalist, Llist)
-    Fstack = F_organize(Flist[0], L_EEG, offset_EEG, avg=True)
-    return Wlist, Fstack, lam
-
-
-def GCCA_multi_modal(datalist, Llist, offsetlist, n_components, rhos, regularization='lwcov'):
-    '''
-    Inputs:
-    datalist: data of different modalities (a list) E.g, [EEG_stack, Stim]
-    Llist: number of taps of different modalities.
-    offsetlist: offset of time lags of different modalities.
-    n_components: number of components
-    rhos: controls the weights of different modalities; should have the same length as the datalist
-    regularization: regularization method when estimating covariance matrices (Default: LedoitWolf)
-    Outputs:
-    Wlist: weights of different modalities (a list)
-    '''
-    dim_list = []
-    flatten_list = []
-    rho_list = []
-    for i in range(len(datalist)):
-        rawdata = datalist[i]
-        L = Llist[i]
-        offset = offsetlist[i]
-        rho = rhos[i]
-        if np.ndim(rawdata) == 3:
-            T, D, N = rawdata.shape
-            X_list = [block_Hankel(rawdata[:,:,n], L, offset) for n in range(N)]
-            X = np.concatenate(tuple(X_list), axis=1)
-            flatten_list.append(X)
-            dim_list = dim_list + [D*L]*N
-            rho_list = rho_list + [rho]*(D*L*N)
-        elif np.ndim(rawdata) == 2:
-            T, D = rawdata.shape
-            flatten_list.append(block_Hankel(rawdata, L, offset))
-            dim_list.append(D*L)
-            rho_list = rho_list + [rho]*(D*L)
-        else:
-            print('Warning: Check dim of data')
-    X_mm = np.concatenate(tuple(flatten_list), axis=1)
-    Rxx = np.cov(X_mm, rowvar=False)
-    Dxx = np.zeros_like(Rxx)
-    dim_accumu = 0
-    for dim in dim_list:
-        if regularization == 'lwcov':
-            Rxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim] = LedoitWolf().fit(X_mm[:,dim_accumu:dim_accumu+dim]).covariance_
-        Dxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim] = Rxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim]
-        dim_accumu = dim_accumu + dim
-    Rxx = Rxx*np.expand_dims(np.array(rho_list), axis=0)
-    # Dxx and Rxx are symmetric matrices, so here we can use eigh
-    # Otherwise we should use eig, which is much slower
-    # Generalized eigenvalue decomposition
-    # Dxx @ W = Rxx @ W @ np.diag(lam)
-    # Dxx @ W[:,i] = lam[i] * Rxx @ W[:,i]
-    # lam, W = eigh(Dxx, Rxx, subset_by_index=[0,n_components-1]) # automatically ascend
-    # lam, W = eigs(Dxx, n_components, Rxx, which='SR')
-    # W = np.real(W)
-    lam, W = eig(Dxx, Rxx)
-    idx = np.argsort(lam)
-    lam = np.real(lam[idx]) # rank eigenvalues
-    W = np.real(W[:, idx]) # rearrange eigenvectors accordingly
-    Lam = np.diag(lam)[:n_components,:n_components]
-    Rxx = Rxx * np.expand_dims(np.array(rho_list), axis=1)
-    W = W[:,:n_components]
-    # Right scaling
-    W = W @ sqrtm(LA.inv(Lam.T @ W.T @ Rxx @ W @ Lam))
-    # Forward models
-    F = T * Dxx @ W
-    # Organize weights of different modalities
-    Wlist = W_organize(W, datalist, Llist)
-    Flist = W_organize(F, datalist, Llist)
-    return Wlist, Flist, lam[:n_components]
+def eval_compete(corr_att_fold, corr_unatt_fold, nb_comp_into_account=2):
+    corr_att_cv = np.mean(corr_att_fold, axis=0)
+    corr_unatt_cv = np.mean(corr_unatt_fold, axis=0)
+    print('Mean corr with attended features across trials and folds: ', corr_att_cv[:nb_comp_into_account])
+    print('Mean corr with unattended features across trials and folds: ', corr_unatt_cv[:nb_comp_into_account])
+    nb_correct = sum(corr_att_fold[:,:nb_comp_into_account].max(axis=1)>corr_unatt_fold[:,:nb_comp_into_account].max(axis=1))
+    nb_test = corr_att_fold.shape[0]
+    acc = nb_correct/nb_test
+    p_value = binomtest(nb_correct, nb_test, alternative='greater').pvalue
+    acc_sig = sig_level_binomial_test(0.05, nb_test)
+    print('Accuracy: ', acc, ' p-value: ', p_value)
+    return acc, p_value, acc_sig, corr_att_cv, corr_unatt_cv
 
 
 def W_organize(W, datalist, Llist):
@@ -807,218 +469,6 @@ def forward_model(X, W_Hankel, L=1, offset=0):
     return F
 
 
-def rescale(W, Dxx):
-    '''
-    LEGACY
-    To make w_n^H R_{xn xn} w_n = 1 for all n. Then the denominators of correlation coefficients between every pairs are the same.
-    '''
-    _, N, n_componets = W.shape
-    for i in range(n_componets):
-        W_split = np.split(W[:,:,i], N, axis=1)
-        W_blkdiag = scipy.sparse.block_diag(W_split)
-        scales = np.diag(np.transpose(W_blkdiag)@Dxx@W_blkdiag)
-        W[:,:,i] = W[:,:,i]/np.sqrt(scales)
-    return W
-
-
-def avg_corr_coe(X_stack, W, L, offset, n_components=5, ChDist=True):
-    '''
-    Calculate the pairwise average correlation.
-    Inputs:
-    X_stack: stacked (along axis 2) data of different subjects
-    W: weights 1) dim(W)=2: results of correlated component analysis 2) dim(W)=3: results of GCCA
-    L: number of taps (if we use spatial-temporal filter)
-    n_components: number of components
-    Output:
-    avg_corr: average pairwise correlation
-    '''
-    _, _, N = X_stack.shape
-    Hankellist = [np.expand_dims(block_Hankel(X_stack[:,:,n], L, offset), axis=2) for n in range(N)]
-    X_stack = np.concatenate(tuple(Hankellist), axis=2)
-    corr_mtx_stack = np.zeros((N,N,n_components))
-    avg_corr = np.zeros(n_components)
-    if np.ndim (W) == 2:
-        W = np.expand_dims(W, axis=1)
-        W = np.repeat(W, N, axis=1)
-    for component in range(n_components):
-        w = W[:,:,component]
-        w = np.expand_dims(w, axis=1)
-        X_trans = np.einsum('tdn,dln->tln', X_stack, w)
-        X_trans = np.squeeze(X_trans, axis=1)
-        corr_mtx_stack[:,:,component] = np.corrcoef(X_trans, rowvar=False)
-        avg_corr[component] = np.sum(corr_mtx_stack[:,:,component]-np.eye(N))/N/(N-1)
-    if ChDist:
-        Squared_corr = np.sum(np.square(corr_mtx_stack[:,:,:3]), axis=2)
-        avg_TSC = np.sum(Squared_corr-3*np.eye(N))/N/(N-1)
-        Chordal_dist = np.sqrt(3-Squared_corr)
-        avg_ChDist = np.sum(Chordal_dist)/N/(N-1)
-    else:
-        avg_ChDist = None
-        avg_TSC = None
-    return avg_corr, avg_ChDist, avg_TSC
-
-
-def avg_corr_coe_multi_modal(datalist, Wlist, Llist, offsetlist, n_components=5, ISC=True, ChDist=True):
-    '''
-    Calculate the pairwise average correlation.
-    Inputs:
-    datalist: data of different modalities (a list) E.g, [EEG_stack, Stim]
-    Wlist: weights of different modalities (a list)
-    Llist: number of taps of different modalities.
-    n_components: number of components
-    Output:
-    avg_corr: average pairwise correlation
-    '''
-    if ISC and (np.ndim(datalist[0]) != 2): # calculate avg correlation across only EEG views, unless there is only one EEG subject (CCA)
-        avg_corr, avg_ChDist, avg_TSC = avg_corr_coe(datalist[0], Wlist[0], Llist[0], offsetlist[0], n_components=n_components, ChDist=ChDist)
-    else:
-        avg_corr = np.zeros(n_components)
-        corr_mtx_list = []
-        n_mod = len(datalist)
-        for component in range(n_components):
-            X_trans_list = []
-            for i in range(n_mod):
-                W = Wlist[i]
-                rawdata = datalist[i]
-                L = Llist[i]
-                offset = offsetlist[i]
-                if np.ndim(W) == 3:
-                    w = W[:,:,component]
-                    w = np.expand_dims(w, axis=1)
-                    data_trans = [np.expand_dims(block_Hankel(rawdata[:,:,n],L,offset),axis=2) for n in range(rawdata.shape[2])]
-                    data = np.concatenate(tuple(data_trans), axis=2)
-                    X_trans = np.einsum('tdn,dln->tln', data, w)
-                    X_trans = np.squeeze(X_trans, axis=1)
-                if np.ndim(W) == 2:
-                    w = W[:,component]
-                    data = block_Hankel(rawdata,L,offset)
-                    X_trans = data@w
-                    X_trans = np.expand_dims(X_trans, axis=1)
-                X_trans_list.append(X_trans)
-            X_trans_all = np.concatenate(tuple(X_trans_list), axis=1)
-            corr_mtx = np.corrcoef(X_trans_all, rowvar=False)
-            N = X_trans_all.shape[1]
-            corr_mtx_list.append(corr_mtx)
-            avg_corr[component] = np.sum(corr_mtx-np.eye(N))/N/(N-1)
-        if ChDist:
-            corr_mtx_stack = np.stack(corr_mtx_list, axis=2)
-            Squared_corr = np.sum(np.square(corr_mtx_stack[:,:,:3]), axis=2)
-            avg_TSC = np.sum(Squared_corr-3*np.eye(N))/N/(N-1)
-            Chordal_dist = np.sqrt(3-Squared_corr)
-            avg_ChDist = np.sum(Chordal_dist)/N/(N-1)
-        else:
-            avg_ChDist = None
-            avg_TSC = None
-    return avg_corr, avg_ChDist, avg_TSC
-
-
-def cross_val_CCA(EEG_list, feature_list, fs, L_EEG=1, L_feat=1, offsetx=0, offsety=0, fold=10, n_components=5, regularization='lwcov', K_regu=None, message=True, signifi_level=True, pool=True):
-    corr_train = np.zeros((fold, n_components))
-    corr_test = np.zeros((fold, n_components))
-    dist_train = np.zeros((fold, 1))
-    dist_test = np.zeros((fold, 1))
-    for idx in range(fold):
-        # EEG_train, EEG_test, Sti_train, Sti_test = split(EEG_list, feature_list, fold=fold, fold_idx=idx+1)
-        EEG_train, EEG_test, Sti_train, Sti_test = split_balance(EEG_list, feature_list, fold=fold, fold_idx=idx+1)
-        corr_train[idx,:], dist_train[idx], _, V_A_train, V_B_train, Lam = cano_corr(EEG_train, Sti_train, Lx=L_EEG, Ly=L_feat, offsetx=offsetx, offsety=offsety, n_components=n_components, regularization=regularization, K_regu=K_regu)
-        corr_test[idx,:], dist_test[idx], _, _, _, _ = cano_corr(EEG_test, Sti_test, Lx=L_EEG, Ly=L_feat, offsetx=offsetx, offsety=offsety, n_components=n_components, regularization=regularization, K_regu=K_regu, V_A=V_A_train, V_B=V_B_train, Lam=Lam)
-    if signifi_level:
-        if pool:
-            corr_trials = permutation_test(EEG_test, Sti_test, Lx=L_EEG, Ly=L_feat, offsetx=offsetx, offsety=offsety, num_test=1000, block_len=1, n_components=n_components, regularization=regularization, K_regu=K_regu, V_A=V_A_train, V_B=V_B_train, Lam=Lam)
-            corr_trials = np.sort(abs(corr_trials), axis=None)
-            print('Significance level: {}'.format(corr_trials[-50*n_components])) # top 5%
-        else:
-            corr_trials = permutation_test(EEG_test, Sti_test, Lx=L_EEG, Ly=L_feat, offsetx=offsetx, offsety=offsety, num_test=1000, block_len=20*fs, n_components=n_components, regularization=regularization, K_regu=K_regu, V_A=V_A_train, V_B=V_B_train, Lam=Lam)
-            corr_trials = np.sort(abs(corr_trials), axis=0)
-            print('Significance level of each component: {}'.format(corr_trials[-50,:])) # top 5%
-    if message:
-        print('Average correlation coefficients of the top {} components on the training sets: {}'.format(n_components, np.average(corr_train, axis=0)))
-        print('Average correlation coefficients of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
-    return corr_train, corr_test, dist_train, dist_test, V_A_train, V_B_train
-
-
-def cross_val_GCCA(nested_data, L, offset, fs, fold=10, n_components=5, regularization='lwcov', message=True, signifi_level=True, ISC=True, pool=True):
-    corr_train = np.zeros((fold, n_components))
-    corr_test = np.zeros((fold, n_components))
-    tsc_train = np.zeros((fold, 1))
-    tsc_test = np.zeros((fold, 1))
-    dist_train = np.zeros((fold, 1))
-    dist_test = np.zeros((fold, 1))
-    for idx in range(fold):
-        train_list, test_list = split_mm_balance([nested_data], fold=fold, fold_idx=idx+1)
-        W_train, F_train, _ = GCCA(train_list[0], L, offset, n_components=n_components, regularization=regularization)
-        corr_train[idx,:], dist_train[idx], tsc_train[idx] = avg_corr_coe(train_list[0], W_train, L, offset, n_components=n_components)
-        corr_test[idx,:], dist_test[idx], tsc_test[idx] = avg_corr_coe(test_list[0], W_train, L, offset, n_components=n_components)
-    if signifi_level:
-        if pool:
-            corr_trials = permutation_test_GCCA(test_list, [L], [offset], num_test=1000, block_len=1, n_components=n_components, Wlist=[W_train], ISC=ISC)
-            corr_trials = np.sort(abs(corr_trials), axis=None)
-            print('Significance level: {}'.format(corr_trials[-50*n_components]))
-        else:
-            corr_trials = permutation_test_GCCA(test_list, [L], [offset], num_test=1000, block_len=20*fs, n_components=n_components, Wlist=[W_train], ISC=ISC)
-            corr_trials = np.sort(abs(corr_trials), axis=0)
-            print('Significance level of each component: {}'.format(corr_trials[-50,:])) # top 5%
-    if message:
-        print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_train, axis=0)))
-        print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
-    return corr_train, corr_test, tsc_train, tsc_test, dist_train, dist_test, W_train, F_train
-
-
-def cross_val_SI_GCCA(nested_datalist, Llist, offsetlist, rho, fs, fold=10, n_components=5, regularization='lwcov', message=True, signifi_level=True, ISC=True, pool=True):
-    corr_train = np.zeros((fold, n_components))
-    corr_test = np.zeros((fold, n_components))
-    tsc_train = np.zeros((fold, 1))
-    tsc_test = np.zeros((fold, 1))
-    dist_train = np.zeros((fold, 1))
-    dist_test = np.zeros((fold, 1))
-    for idx in range(fold):
-        train_list, test_list = split_mm_balance(nested_datalist, fold=fold, fold_idx=idx+1)
-        Wlist_train, F_train, _ = SI_GCCA(train_list, Llist, offsetlist, n_components=n_components, rho=rho, regularization=regularization)
-        corr_train[idx,:], dist_train[idx], tsc_train[idx] = avg_corr_coe_multi_modal(train_list, Wlist_train, Llist, offsetlist, n_components=n_components, ISC=ISC)
-        corr_test[idx,:], dist_test[idx], tsc_test[idx] = avg_corr_coe_multi_modal(test_list, Wlist_train, Llist, offsetlist, n_components=n_components, ISC=ISC)
-    if signifi_level:
-        if pool:
-            corr_trials = permutation_test_GCCA(test_list, Llist, offsetlist, num_test=1000, block_len=1, n_components=n_components, Wlist=Wlist_train, ISC=ISC)
-            corr_trials = np.sort(abs(corr_trials), axis=None)
-            print('Significance level: {}'.format(corr_trials[-50*n_components]))
-        else:
-            corr_trials = permutation_test_GCCA(test_list, Llist, offsetlist, num_test=1000, block_len=20*fs, n_components=n_components, Wlist=Wlist_train, ISC=ISC)
-            corr_trials = np.sort(abs(corr_trials), axis=0)
-            print('Significance level of each component: {}'.format(corr_trials[-50,:])) # top 5%
-    if message:
-        print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_train, axis=0)))
-        print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
-    return corr_train, corr_test, tsc_train, tsc_test, dist_train, dist_test, Wlist_train, F_train
-
-
-def cross_val_GCCA_multi_mod(nested_datalist, Llist, offsetlist, rhos, fs, fold=10, n_components=5, regularization='lwcov', message=True, signifi_level=True, ISC=True, pool=True):
-    corr_train = np.zeros((fold, n_components))
-    corr_test = np.zeros((fold, n_components))
-    tsc_train = np.zeros((fold, 1))
-    tsc_test = np.zeros((fold, 1))
-    dist_train = np.zeros((fold, 1))
-    dist_test = np.zeros((fold, 1))
-    for idx in range(fold):
-        # train_list, test_list = split_multi_mod(datalist, fold=fold, fold_idx=idx+1)
-        train_list, test_list = split_mm_balance(nested_datalist, fold=fold, fold_idx=idx+1)
-        Wlist_train, Flist_train, _ = GCCA_multi_modal(train_list, Llist, offsetlist, n_components=n_components, rhos=rhos, regularization=regularization)
-        corr_train[idx,:], dist_train[idx], tsc_train[idx] = avg_corr_coe_multi_modal(train_list, Wlist_train, Llist, offsetlist, n_components=n_components, ISC=ISC)
-        corr_test[idx,:], dist_test[idx], tsc_test[idx] = avg_corr_coe_multi_modal(test_list, Wlist_train, Llist, offsetlist, n_components=n_components, ISC=ISC)
-    if signifi_level:
-        if pool:
-            corr_trials = permutation_test_GCCA(test_list, Llist, offsetlist, num_test=1000, block_len=1, n_components=n_components, Wlist=Wlist_train, ISC=ISC)
-            corr_trials = np.sort(abs(corr_trials), axis=None)
-            print('Significance level: {}'.format(corr_trials[-50*n_components]))
-        else:
-            corr_trials = permutation_test_GCCA(test_list, Llist, offsetlist, num_test=1000, block_len=20*fs, n_components=n_components, Wlist=Wlist_train, ISC=ISC)
-            corr_trials = np.sort(abs(corr_trials), axis=0)
-            print('Significance level of each component: {}'.format(corr_trials[-50,:])) # top 5%
-    if message:
-        print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_train, axis=0)))
-        print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
-    return corr_train, corr_test, tsc_train, tsc_test, dist_train, dist_test, Wlist_train, Flist_train
-
-
 def shuffle_block(X, block_len):
     '''
     Shuffle the blocks of X along the time axis for each subject.
@@ -1073,71 +523,6 @@ def shuffle_datalist(datalist, block_len):
         elif np.ndim(data) == 3:
             datalist_shuffled.append(shuffle_3D(data, block_len))
     return datalist_shuffled
-
-
-def permutation_test(X, Y, Lx, Ly, offsetx, offsety, num_test, block_len, n_components, regularization, K_regu, V_A, V_B, Lam):
-    corr_coe_topK = np.zeros((num_test, n_components))
-    for i in tqdm(range(num_test)):
-        X_shuffled = shuffle_2D(X, block_len)
-        Y_shuffled = shuffle_2D(Y, block_len)
-        corr_coe_topK[i,:], _, _, _, _, _ = cano_corr(X_shuffled, Y_shuffled, Lx=Lx, Ly=Ly, offsetx=offsetx, offsety=offsety, n_components=n_components, regularization=regularization, K_regu=K_regu, V_A=V_A, V_B=V_B, Lam=Lam)
-    return corr_coe_topK
-
-
-def permutation_test_GCCA(datalist, Llist, offsetlist, num_test, block_len, n_components, Wlist, ISC):
-    corr_coe_topK = np.empty((0, n_components))
-    for i in tqdm(range(num_test)):
-        datalist_shuffled = []
-        for data in datalist:
-            if np.ndim(data) == 2:
-                datalist_shuffled.append(shuffle_2D(data, block_len))
-            elif np.ndim(data) == 3:
-                datalist_shuffled.append(shuffle_3D(data, block_len))
-        corr_coe, _, _ = avg_corr_coe_multi_modal(datalist_shuffled, Wlist, Llist, offsetlist, n_components=n_components, ISC=ISC)
-        corr_coe_topK = np.concatenate((corr_coe_topK, np.expand_dims(corr_coe[:n_components], axis=0)), axis=0)
-    return corr_coe_topK
-
-
-def data_superbowl(head, datatype='preprocessed', year='2012', view='Y1'):
-    path = head+'/'+datatype+'/'+year+'/'
-    datafiles = os.listdir(path)
-    X = []
-    for datafile in datafiles:
-        EEGdata = scipy.io.loadmat(path+datafile)
-        fs = int(EEGdata['fsref'])
-        data_per_subject = np.concatenate(tuple([EEGdata['Y1'][i][0] for i in range(len(EEGdata[view]))]),axis=1)
-        data_per_subject = np.nan_to_num(data_per_subject, copy=False)
-        X.append(np.transpose(data_per_subject))
-    X = np.stack(tuple(X), axis=2)
-    return X, fs
-
-
-def rho_sweep(nested_datalist, sweep_list, Llist, offsetlist, fs, fold=10, n_components=5, message=False, ISC=True, iflist=False, compdist=True):
-    best = -np.Inf
-    for i in sweep_list:
-        if iflist:
-            rho = [1, 10**i]
-            corr_train, corr_test, _, _, dist_train, dist_test, _, _ = cross_val_GCCA_multi_mod(nested_datalist, Llist, offsetlist, rho, fs, fold, n_components, regularization='lwcov', message=False, signifi_level=False, ISC=ISC)
-        else:
-            rho = 10**i
-            corr_train, corr_test, _, _, dist_train, dist_test, _, _ = cross_val_SI_GCCA(nested_datalist, Llist, offsetlist, rho, fs, fold, n_components, regularization='lwcov', message=False, signifi_level=False, ISC=ISC)
-        avg_corr_train = np.average(corr_train, axis=0)
-        avg_corr_test = np.average(corr_test, axis=0)
-        avg_dist_train = np.average(dist_train)
-        avg_dist_test = np.average(dist_test)
-        if message:
-            print('Average ISC across different training sets when rho=10**{}: {}'.format(i, avg_corr_train))
-            print('Average ISC across different test sets when rho=10**{}: {}'.format(i, avg_corr_test))
-            print('Average ISD across different training sets when rho=10**{}: {}'.format(i, avg_dist_train))
-            print('Average ISD across different test sets when rho=10**{}: {}'.format(i, avg_dist_test))
-        if compdist:
-            comp_value = -avg_dist_test # the smaller the better
-        else:
-            comp_value = max(avg_corr_test)
-        if comp_value > best:
-            rho_best = rho
-            best = comp_value
-    return rho_best
 
 
 def EEG_normalization(data, len_seg):
@@ -1292,27 +677,6 @@ def clean_features(feats, smooth=True):
     return y
 
 
-def name_paths(eeg_path_head, feature_path_head):
-    '''
-    Find the name of the videos and the paths of the corresponding eeg signals and features
-    Inputs:
-    eeg_path_head: relative path of the eeg folder
-    feature_path_head: relative path of the feature folder
-    Output:
-    videonames: names of the video
-    eeg_sets_paths: relative paths of the eeg sets
-    feature_sets_paths: relative paths of the feature sets
-    '''
-    eeg_list = os.listdir(eeg_path_head)
-    eeg_sets = [i for i in eeg_list if i.endswith('.set')]
-    eeg_sets_paths = [eeg_path_head+i for i in eeg_sets]
-    feature_list = os.listdir(feature_path_head)
-    feature_sets = [i for i in feature_list if i.endswith('.mat')]
-    feature_sets_paths = [feature_path_head+i for i in feature_sets]
-    videonames = [i[:-4] for i in eeg_sets]
-    return videonames, eeg_sets_paths, feature_sets_paths
-
-
 def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=False, ifeps=False, idx_sig=None):
     _, n_components = forward_model.shape
     biosemi_layout = mne.channels.read_layout('biosemi')
@@ -1353,118 +717,3 @@ def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=Fa
         plt.savefig(file_name, dpi=600)
     plt.close()
 
-
-def load_eeg_feature(idx, videonames, eeg_sets_paths, feature_sets_paths, feature_type='muFlow', bads=[], eog=False, regression=False):
-    '''
-    Load the features and eeg signals of a specific dataset
-    Inputs:
-    idx: the index of the wanted dataset
-    videonames: names of the video
-    eeg_sets_paths: relative paths of the eeg sets
-    feature_sets_paths: relative paths of the feature sets
-    Outputs:
-    eeg_downsampled: down sampled (and preprocessed) eeg signals
-    normalized_features: normalized features 
-    times: time axis 
-    fsStim: sample rate of both stimulus and eeg signals
-    '''
-    # Load features and EEG signals
-    videoname = videonames[idx]
-    matching = [s for s in feature_sets_paths if videoname in s]
-    assert len(matching) == 1
-    features_data = scipy.io.loadmat(matching[0])
-    fsStim = int(features_data['fsVideo']) # fs of the video 
-    features = np.nan_to_num(features_data[feature_type]) # feature: optical flow
-    eeg_prepro, _ = preprocessing(eeg_sets_paths[idx], HP_cutoff = 0.5, AC_freqs=50, resamp_freqs=fsStim, bads=bads, eog=eog, regression=regression)
-    # Clip data
-    eeg_channel_indices = mne.pick_types(eeg_prepro.info, eeg=True)
-    eeg_downsampled, times = eeg_prepro[eeg_channel_indices]
-    if len(features) > len(times):
-        features = features[:len(times)]
-    else:
-        times = times[:len(features)]
-        eeg_downsampled = eeg_downsampled[:,:len(features)]
-    eeg_downsampled = eeg_downsampled.T
-    # normalized_features = features/LA.norm(features)  # normalize features
-    fs = fsStim
-    # export_path = eeg_sets_paths[idx][:-4] + '.mat'
-    # scipy.io.savemat(export_path, {'eeg'+videoname: eeg_downsampled.T, 'fs': fs})
-    return eeg_downsampled, features, times, fs
-
-
-def concatenate_eeg_feature(videonames, eeg_sets_paths, feature_sets_paths, feature_type='muFlow', bads=[], eog=False, regression=False):
-    eeg_downsampled_list = []
-    features_list = []
-    for idx in range(len(videonames)):
-        eeg_downsampled, features, _, fs = load_eeg_feature(idx, videonames, eeg_sets_paths, feature_sets_paths, feature_type, bads, eog, regression)
-        eeg_downsampled_list.append(eeg_downsampled)
-        features_list.append(features)
-    eeg_concat = np.concatenate(eeg_downsampled_list, axis=0)
-    features_concat = np.concatenate(features_list)
-    times = np.array(range(len(features_concat)))/fs
-    return eeg_concat, features_concat, times, fs
-
-
-def load_eeg_env(idx, audionames, eeg_sets_paths, env_sets_paths, resamp_freq=20, band=[2, 9]):
-    # Load features and EEG signals
-    audioname = audionames[idx]
-    matching = [s for s in env_sets_paths if audioname in s]
-    assert len(matching) == 1
-    envelope = np.squeeze(scipy.io.loadmat(matching[0])['envelope'])
-    eeg_prepro, fsEEG = preprocessing(eeg_sets_paths[idx], HP_cutoff = 0.5, AC_freqs=50)
-    # Clip data
-    eeg_channel_indices = mne.pick_types(eeg_prepro.info, eeg=True)
-    eeg, times = eeg_prepro[eeg_channel_indices]
-    if len(envelope) > len(times):
-        envelope = envelope[:len(times)]
-    else:
-        eeg = eeg[:,:len(envelope)]
-    # Band-pass and down sample
-    sos_bp = signal.butter(4, band, 'bandpass', output='sos', fs=fsEEG)
-    eeg_filtered = signal.sosfilt(sos_bp, eeg)
-    env_filtered = signal.sosfilt(sos_bp, envelope)
-    eeg_downsampled = signal.resample_poly(eeg_filtered, resamp_freq, fsEEG, axis=1)
-    env_downsampled = signal.resample_poly(env_filtered, resamp_freq, fsEEG)
-    eeg_downsampled = eeg_downsampled.T
-    times = np.array(range(len(eeg_downsampled)))/resamp_freq
-    return eeg_downsampled, env_downsampled, times
-
-
-def concatenate_eeg_env(audionames, eeg_sets_paths, env_sets_paths, resamp_freq=20, band=[2, 9]):
-    eeg_downsampled_list = []
-    env_downsampled_list = []
-    for idx in range(len(audionames)):
-        eeg_downsampled, env_downsampled, _ = load_eeg_env(idx, audionames, eeg_sets_paths, env_sets_paths, resamp_freq, band)
-        eeg_downsampled_list.append(eeg_downsampled)
-        env_downsampled_list.append(env_downsampled)
-    # TODO: Do we need to normalize eeg signals when concatenating them?
-    eeg_concat = np.concatenate(eeg_downsampled_list, axis=0)
-    env_concat = np.concatenate(env_downsampled_list)
-    times = np.array(range(len(env_concat)))/resamp_freq
-    return eeg_concat, env_concat, times
-
-
-def multisub_data_org(subjects, video, folder='EOG', feature_type=['muFlow'], bads=[], eog=False, regression=False, normalize=True):
-    feature_path = '../../Experiments/Videos/stimuli/' + video + '_features.mat'
-    features_data = scipy.io.loadmat(feature_path)
-    fsStim = int(features_data['fsVideo']) # fs of the video 
-    features_list = [np.abs(np.nan_to_num(features_data[type])) for type in feature_type]
-    features = np.concatenate(tuple(features_list), axis=1)
-    # features = features/LA.norm(features) # Normalize here or normalize the concatenated features?
-    T = features.shape[0]
-    eeg_list = []
-    for sub in subjects:
-        eeg_path = '../../Experiments/data/'+ sub +'/' + folder + '/' + video + '.set'
-        eeg_prepro, fs, _ = preprocessing(eeg_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=fsStim, bads=bads, eog=eog, regression=regression, normalize=normalize)
-        eeg_channel_indices = mne.pick_types(eeg_prepro.info, eeg=True)
-        eeg_downsampled, _ = eeg_prepro[eeg_channel_indices]
-        eeg_downsampled = eeg_downsampled.T
-        eeg_list.append(eeg_downsampled)
-        if eeg_downsampled.shape[0] < T:
-            T = eeg_downsampled.shape[0]
-    # Clip data
-    features = features[:T, :]
-    eeg_list = [np.expand_dims(eeg[:T,:], axis=2) for eeg in eeg_list]
-    eeg_multisub = np.concatenate(tuple(eeg_list), axis=2)
-    times = np.array(range(T))/fs
-    return features, eeg_multisub, fs, times
