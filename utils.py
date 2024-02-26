@@ -4,6 +4,8 @@ import mne
 import scipy.io
 import matplotlib.pyplot as plt
 import copy
+import pickle
+import os
 from numpy import linalg as LA
 from scipy import signal
 from scipy.linalg import toeplitz, eig, eigh, sqrtm, lstsq
@@ -717,3 +719,194 @@ def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=Fa
         plt.savefig(file_name, dpi=600)
     plt.close()
 
+
+def create_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+def get_features(feats_path_folder, video_id, len_seg, offset=None, smooth=True):
+    with open(feats_path_folder + video_id + '_mask.pkl', 'rb') as f:
+        feats = pickle.load(f)
+    feats = np.concatenate(tuple(feats), axis=0)
+    feats = clean_features(feats, smooth=smooth)
+    if offset is not None:
+        end_idx = min(offset + len_seg, feats.shape[0])
+        start_idx = end_idx - len_seg
+        feats = feats[start_idx:end_idx, :]
+    else:
+        feats = feats[:len_seg, :]
+    return feats
+
+
+def get_gaze(gaze_path, len_seg, offset=None):
+    gaze = np.load(gaze_path, allow_pickle=True)
+    # interpolate missing values
+    gaze = np.array([np.nan if x is None else x for x in gaze])
+    gaze_clean = clean_features(gaze.astype(np.float64), smooth=False)
+    if offset is not None:
+        end_idx = min(offset + len_seg, gaze_clean.shape[0])
+        start_idx = end_idx - len_seg
+        gaze_clean = gaze_clean[start_idx:end_idx, :]
+    else:
+        gaze_clean = gaze_clean[:len_seg, :]
+    return gaze_clean
+
+
+def get_eeg_eog(eeg_path, fsStim, bads, expdim=True):
+    eeg_prepro, fs, _ = preprocessing(eeg_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=fsStim, bads=bads, eog=True, regression=True, normalize=True)
+    eeg_channel_indices = mne.pick_types(eeg_prepro.info, eeg=True)
+    eog_channel_indices = mne.pick_types(eeg_prepro.info, eog=True)
+    eeg_downsampled, _ = eeg_prepro[eeg_channel_indices]
+    eog_downsampled, _ = eeg_prepro[eog_channel_indices]
+    if expdim:
+        eeg_downsampled = np.expand_dims(eeg_downsampled.T, axis=2)
+        eog_downsampled = np.expand_dims(eog_downsampled.T, axis=2)
+    return eeg_downsampled, eog_downsampled, fs
+
+
+def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, expdim=True):
+    eeg_files_all = [file for file in os.listdir(eeg_folder) if file.endswith('.set')]
+    if singleobj:
+        files = [file for file in eeg_files_all if len(file.split('_')) == 1]
+    else:
+        files = [file for file in eeg_files_all if len(file.split('_')) == 3]
+    files.sort()
+    nb_files = len(files)
+    eeg_list = []
+    eog_list = []
+    len_seg_list = []
+    gaze_list = []
+    for file in files:
+        eeg_downsampled, eog_downsampled, fs = get_eeg_eog(eeg_folder + file, fsStim, bads, expdim)
+        eeg_list.append(eeg_downsampled)
+        eog_list.append(eog_downsampled)
+        len_seg_list.append(eeg_downsampled.shape[0])
+        id_att = file[:-4].split('_')[-1]
+        gaze_file = [file for file in os.listdir(eeg_folder) if file.endswith('.npy') and file.split('_')[-2]==id_att]
+        if len(gaze_file) == 1:
+            offset = 122 * fsStim if not singleobj else None
+            gaze = get_gaze(eeg_folder + gaze_file[0], len_seg_list[-1], offset)
+            gaze = np.expand_dims(gaze, axis=2)
+        else:
+            gaze = np.zeros((len_seg_list[-1], 2, 1))
+        gaze_list.append(gaze)
+    if feats_path_folder is not None:
+        feat_att_list = []
+        feat_unatt_list = []
+        for i in range(len(files)):
+            file = files[i]
+            len_seg = len_seg_list[i]
+            name = file[:-4]
+            id_att = name.split('_')[-1]
+            if singleobj:
+                feats_att = get_features(feats_path_folder, id_att, len_seg, offset=None, smooth=True)
+                feats_unatt = None
+            else:
+                offset = 122 * fsStim
+                ids = set(name.split('_'))
+                ids.remove(id_att)
+                id_unatt = ids.pop()
+                feats_att = get_features(feats_path_folder, id_att, len_seg, offset, smooth=True)
+                feats_unatt = get_features(feats_path_folder, id_unatt, len_seg, offset, smooth=True)
+            feat_att_list.append(feats_att)
+            feat_unatt_list.append(feats_unatt)
+    else:
+        feat_att_list = None
+        feat_unatt_list = None
+    return eeg_list, eog_list, feat_att_list, feat_unatt_list, gaze_list, fs, nb_files, len_seg_list
+
+
+def data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, SAVE=True):
+    PATTERN = subj_path[0].split('/')[-3]
+    data_path = 'data/' + PATTERN + '/'
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
+    nb_subj = len(subj_path)
+    eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, nb_files, len_seg_list = data_per_subj(subj_path[0], fsStim, bads[0], singleobj, feats_path_folder)
+    for n in range(1,nb_subj):
+        eeg_list, eog_list, _, _, gaze_list, _, nb_files_sub, _ = data_per_subj(subj_path[n], fsStim, bads[n], singleobj, feats_path_folder=None)
+        assert nb_files == nb_files_sub
+        eeg_multisubj_list = [np.concatenate((eeg_multisubj_list[i], eeg_list[i]), axis=2) for i in range(nb_files)]
+        eog_multisubj_list = [np.concatenate((eog_multisubj_list[i], eog_list[i]), axis=2) for i in range(nb_files)]
+        gaze_multisubj_list = [np.concatenate((gaze_multisubj_list[i], gaze_list[i]), axis=2) for i in range(nb_files)]
+    if SAVE:
+        # save all data (eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, fs, nb_files) into a single file
+        data = {'eeg_multisubj_list': eeg_multisubj_list, 'eog_multisubj_list': eog_multisubj_list, 'feat_att_list': feat_att_list, 'feat_unatt_list': feat_unatt_list, 'gaze_multisubj_list': gaze_multisubj_list, 'fs': fs, 'len_seg_list': len_seg_list}
+        file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+        with open(data_path + file_name, 'wb') as f:
+            pickle.dump(data, f)
+    return eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list
+
+
+def add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj):
+    PATTERN = subj_path[0].split('/')[-3]
+    data_path = 'data/' + PATTERN + '/'
+    file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+    with open(data_path + file_name, 'rb') as f:
+        data = pickle.load(f)
+    nb_subj_old = data['eeg_multisubj_list'][0].shape[2]
+    eeg_multisubj_add, eog_multisubj_add, _, _, gaze_multisubj_add, _, _ = data_multi_subj(subj_path[nb_subj_old:], fsStim, bads[nb_subj_old:], singleobj, feats_path_folder, SAVE=False)
+    eeg_multisubj_list = [np.concatenate((old, new), axis=2) for old, new in zip(data['eeg_multisubj_list'], eeg_multisubj_add)]
+    eog_multisubj_list = [np.concatenate((old, new), axis=2) for old, new in zip(data['eog_multisubj_list'], eog_multisubj_add)]
+    gaze_multisubj_list = [np.concatenate((old, new), axis=2) for old, new in zip(data['gaze_multisubj_list'], gaze_multisubj_add)]
+    data['eeg_multisubj_list'] = eeg_multisubj_list
+    data['eog_multisubj_list'] = eog_multisubj_list
+    data['gaze_multisubj_list'] = gaze_multisubj_list
+    with open(data_path + file_name, 'wb') as f:
+        pickle.dump(data, f)
+    return eeg_multisubj_list, eog_multisubj_list, data['feat_att_list'], data['feat_unatt_list'], gaze_multisubj_list, data['fs'], data['len_seg_list']
+
+
+def remove_shot_cuts(data, fs, time_points=None, remove_time=1):
+    T = data.shape[0]
+    if time_points is None:
+        time_points = [0, T]
+    nearby_idx = []
+    for p in time_points:
+        len_points = int(remove_time*fs)
+        nearby_idx = nearby_idx + list(range(max(0, p-len_points), min(p+len_points, T)))
+    nearby_idx = list(set(nearby_idx))
+    data_clean = np.delete(data, nearby_idx, axis=0)
+    return data_clean
+
+
+def load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj, LOAD_ONLY, ALL_NEW):
+    file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+    if LOAD_ONLY:
+        data_path = 'data/' + PATTERN + '/'
+        with open(data_path + file_name, 'rb') as f:
+            data = pickle.load(f)
+        eeg_multisubj_list = data['eeg_multisubj_list']
+        eog_multisubj_list = data['eog_multisubj_list']
+        feat_att_list = data['feat_att_list']
+        feat_unatt_list = data['feat_unatt_list']
+        gaze_multisubj_list = data['gaze_multisubj_list']
+        fs = data['fs']
+        len_seg_list = data['len_seg_list']
+    else:
+        if ALL_NEW:
+            eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list = data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder)
+        else:
+            eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list = add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj)
+    return eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list
+
+
+# Check the alignment between eog and gaze. The synchronization is good if the peaks of two signals (eye blinks) are aligned.
+def check_alignment(subj_ID, eog_multisubj_list, gaze_multisubj_list, nb_points=500):
+    eog_one_subj_list = [eog[:,:,subj_ID] for eog in eog_multisubj_list]
+    gaze_one_subj_list = [gaze[:,:,subj_ID] for gaze in gaze_multisubj_list]
+    eog_verti_list = [eog[:,0] - eog[:,1] for eog in eog_one_subj_list]
+    gaze_y_list = [gaze[:,1] for gaze in gaze_one_subj_list]
+    nb_videos = len(eog_verti_list)
+    # make a subplot (3 x (nb_videos//3+1)) for each video
+    # draw and save the plot
+    nb_rows = 3
+    nb_cols = nb_videos//3+1
+    fig, ax = plt.subplots(nb_rows, nb_cols, figsize=(15, 10))
+    for i in range(nb_videos):
+        ax[i//nb_cols, i%nb_cols].plot(eog_verti_list[i][-nb_points:]/np.max(eog_verti_list[i][-nb_points:]), label='eog vertical')
+        ax[i//nb_cols, i%nb_cols].plot(gaze_y_list[i][-nb_points:]/np.max(gaze_y_list[i][-nb_points:]), label='gaze y')
+        ax[i//nb_cols, i%nb_cols].set_title('Video ' + str(i+1))
+        ax[i//nb_cols, i%nb_cols].legend()
+    plt.savefig('figures/Overlay/alignment_' + str(subj_ID) + '.png')
