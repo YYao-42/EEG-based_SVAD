@@ -11,30 +11,34 @@ import pickle
 #   3. pipe_mm_trials: Match the desired features under different trial lengths
 #   4. pipe_single_obj: For single object case, get the results of CCA and match-mismatch under different trial lengths
     
-def pipe_att_or_unatt(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, TRAIN_WITH_ATT, figure_dir=None, trial_len=60, fold=5, n_components=5, nb_comp_into_account=2, PLOT=False, signifi_level=True, message=True):
+def pipe_att_or_unatt(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, figure_dir=None, trial_len=60, fold=5, n_components=5, nb_comp_into_account=2, PLOT=False, signifi_level=True, message=True):
     eeg_onesubj_list = [eeg[:,:,Subj_ID] for eeg in eeg_multisubj_list]
     CCA = algo.CanonicalCorrelationAnalysis(eeg_onesubj_list, feat_att_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=fold, n_components=n_components, signifi_level=signifi_level, message=message)
-    corr_att_fold, corr_unatt_fold, V_eeg_train, V_feat_train, sig_corr_att, sig_corr_unatt = CCA.att_or_unatt(feat_unatt_list, trial_len=trial_len, TRAIN_WITH_ATT=TRAIN_WITH_ATT)
+    corr_att_fold, corr_unatt_fold, V_eeg_train, V_feat_train, sig_corr_att, sig_corr_unatt = CCA.att_or_unatt(feat_unatt_list, trial_len=trial_len, TRAIN_WITH_ATT=TRAIN_WITH_ATT, V_eeg=V_eeg, V_Stim=V_Stim)
     acc, p_value, acc_sig, corr_att_cv, corr_unatt_cv= utils.eval_compete(corr_att_fold, corr_unatt_fold, nb_comp_into_account)
     if PLOT:
         # find the indices components with corr > sig_corr
         idx_sig_att = np.where(corr_att_cv > sig_corr_att)[0]
         idx_sig_unatt = np.where(corr_unatt_cv > sig_corr_unatt)[0]
-        figure_name_att = figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) +  '_Train_Att_Test_Att.png' if TRAIN_WITH_ATT else figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_Unatt_Test_Att.png'
-        figure_name_unatt = figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_Att_Test_Unatt.png' if TRAIN_WITH_ATT else figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_Unatt_Test_Unatt.png'
         eeg_onesub = np.concatenate(tuple(eeg_onesubj_list), axis=0)
         forward_model = CCA.forward_model(eeg_onesub, V_eeg_train)
+        if V_eeg is not None:
+            figure_name_att = figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_SO_Test_Att.png'
+            figure_name_unatt = figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_SO_Test_Unatt.png'
+        else:
+            figure_name_att = figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) +  '_Train_Att_Test_Att.png' if TRAIN_WITH_ATT else figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_Unatt_Test_Att.png'
+            figure_name_unatt = figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_Att_Test_Unatt.png' if TRAIN_WITH_ATT else figure_dir + 'Subj_' + str(Subj_ID) + '_Trial_len_' + str(trial_len) + '_Train_Unatt_Test_Unatt.png'
         utils.plot_spatial_resp(forward_model, corr_att_fold, figure_name_att, idx_sig=idx_sig_att)
         utils.plot_spatial_resp(forward_model, corr_unatt_fold, figure_name_unatt, idx_sig=idx_sig_unatt)
     return acc, p_value, acc_sig, corr_att_cv, corr_unatt_cv
 
-def pipe_compete_trials(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, fold=5, n_components=5, nb_comp_into_account=2):
+def pipe_compete_trials(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, V_eeg=None, V_Stim=None, fold=5, n_components=5, nb_comp_into_account=2):
     acc_list = []
     p_value_list = []
     acc_sig_list = []
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
-        acc, p_value, acc_sig, _, _ = pipe_att_or_unatt(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, TRAIN_WITH_ATT=True, trial_len=trial_len, fold=fold, n_components=n_components, nb_comp_into_account=nb_comp_into_account, signifi_level=False, message=False)
+        acc, p_value, acc_sig, _, _ = pipe_att_or_unatt(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, TRAIN_WITH_ATT=True,  V_eeg=V_eeg, V_Stim=V_Stim, trial_len=trial_len, fold=fold, n_components=n_components, nb_comp_into_account=nb_comp_into_account, signifi_level=False, message=False)
         acc_list.append(acc)
         p_value_list.append(p_value)
         acc_sig_list.append(acc_sig)
@@ -44,14 +48,14 @@ def pipe_compete_trials(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_l
     with open(table_name, 'wb') as f:
         pickle.dump(results, f)
 
-def pipe_mm_trials(Subj_ID, eeg_multisubj_list, feat_match_list, feat_distract_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, MATCHATT, fold=5, n_components=5, nb_comp_into_account=2):
+def pipe_mm_trials(Subj_ID, eeg_multisubj_list, feat_match_list, feat_distract_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, MATCHATT, V_eeg=None, V_Stim=None, fold=5, n_components=5, nb_comp_into_account=2):
     acc_list = []
     p_value_list = []
     eeg_onesubj_list = [eeg[:,:,Subj_ID] for eeg in eeg_multisubj_list]
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
         CCA = algo.CanonicalCorrelationAnalysis(eeg_onesubj_list, feat_match_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=fold, n_components=n_components, signifi_level=False, message=False)
-        corr_tensor_list = CCA.match_mismatch(trial_len, feat_distract_list)
+        corr_tensor_list = CCA.match_mismatch(trial_len, feat_distract_list, V_eeg=V_eeg, V_Stim=V_Stim)
         acc, p_value = utils.eval_mm(corr_tensor_list, nb_comp_into_account)
         print('Accuracy: ', acc, 'P-value: ', p_value)
         acc_list.append(acc)
@@ -92,10 +96,10 @@ def pipe_single_obj(Subj_ID, eeg_multisubj_list, feat_match_list, fs, L_EEG, L_S
 # Subjected to change
 subjects = ['Pilot_1', 'Pilot_2', 'Pilot_4', 'Pilot_5']
 bads = [['A30', 'B25'], ['B25'], ['B25'], []] 
-SINGLEOBJ = True
+SINGLEOBJ = False
 LOAD_ONLY = True
 ALL_NEW = False
-subj_to_analyze = 'Pilot_5'
+subj_to_analyze = 'Pilot_2'
 
 # Not subjected to change
 Subj_ID = subjects.index(subj_to_analyze)
@@ -119,17 +123,22 @@ for data_type in data_types:
 
 
 # Data loading and removing shot cuts
-eeg_multisubj_list, eog_multisubj_list, feat_all_att_list, feat_all_unatt_list, gaze_multisubj_list, fs, len_seg_list = utils.load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, SINGLEOBJ, LOAD_ONLY, ALL_NEW)
+eeg_multisubj_list, eog_multisubj_list, feat_all_att_list, feat_all_unatt_list, gaze_multisubj_list, fs, len_seg_list = utils.load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj=False, LOAD_ONLY=LOAD_ONLY, ALL_NEW=ALL_NEW)
 eeg_multisubj_list = [utils.remove_shot_cuts(eeg, fs) for eeg in eeg_multisubj_list]
 eog_multisubj_list = [utils.remove_shot_cuts(eog, fs) for eog in eog_multisubj_list]
 gaze_multisubj_list = [utils.remove_shot_cuts(gaze, fs) for gaze in gaze_multisubj_list]
 feat_all_att_list = [utils.remove_shot_cuts(feat, fs) for feat in feat_all_att_list]
+feat_all_unatt_list = [utils.remove_shot_cuts(feat, fs) for feat in feat_all_unatt_list]
 objflow_att_list = [feats[:,8] for feats in feat_all_att_list]
-objtempctr_att_list = [feats[:,17] for feats in feat_all_att_list]
-if not SINGLEOBJ:
-    feat_all_unatt_list = [utils.remove_shot_cuts(feat, fs) for feat in feat_all_unatt_list]
-    objflow_unatt_list = [feats[:,8] for feats in feat_all_unatt_list]
-    objtempctr_unatt_list = [feats[:,17] for feats in feat_all_unatt_list]
+objflow_unatt_list = [feats[:,8] for feats in feat_all_unatt_list]
+if SINGLEOBJ:
+    eeg_multisubj_SO_list, eog_multisubj_SO_list, feat_all_SO_list, _, gaze_multisubj_SO_list, fs, len_seg_SO_list = utils.load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj=True, LOAD_ONLY=LOAD_ONLY, ALL_NEW=ALL_NEW)
+    eeg_multisubj_SO_list = [utils.remove_shot_cuts(eeg, fs) for eeg in eeg_multisubj_SO_list]
+    eog_multisubj_SO_list = [utils.remove_shot_cuts(eog, fs) for eog in eog_multisubj_SO_list]
+    gaze_multisubj_SO_list = [utils.remove_shot_cuts(gaze, fs) for gaze in gaze_multisubj_SO_list]
+    feat_all_SO_list = [utils.remove_shot_cuts(feat, fs) for feat in feat_all_SO_list]
+    objflow_SO_list = [feats[:,8] for feats in feat_all_SO_list]
+
 # optional: check the alignment of the data
 utils.check_alignment(Subj_ID, eog_multisubj_list, gaze_multisubj_list, nb_points=500)
 
@@ -140,13 +149,23 @@ offset_EEG = 1
 offset_Stim = 0 
 trial_len_list = list(range(5, 125, 5))
 feat_att_list = objflow_att_list
-if not SINGLEOBJ:
-    feat_unatt_list = objflow_unatt_list
+feat_unatt_list = objflow_unatt_list
 
 if SINGLEOBJ:
     # Pipeline 0: Single object
     # Using EEG data
-    pipe_single_obj(Subj_ID, eeg_multisubj_list, feat_att_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, figure_dirs['EEG'], table_dirs['EEG'], fold=5, n_components=5, PLOT=True, trial_len=60, trial_len_list=trial_len_list, nb_comp_into_account=2)
+    pipe_single_obj(Subj_ID, eeg_multisubj_SO_list, objflow_SO_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, figure_dirs['EEG'], table_dirs['EEG'], fold=5, n_components=5, PLOT=True, trial_len=60, trial_len_list=trial_len_list, nb_comp_into_account=2)
+    eeg_onesubj_SO_list = [eeg[:,:,Subj_ID] for eeg in eeg_multisubj_SO_list]
+    CCA_SO = algo.CanonicalCorrelationAnalysis(eeg_onesubj_SO_list, objflow_SO_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, n_components=5)
+    EEG_SO = np.concatenate(tuple(eeg_onesubj_SO_list), axis=0)
+    feat_SO = np.concatenate(tuple(objflow_SO_list), axis=0)
+    _, _, _, _, V_eeg_SO, V_Stim_SO, _ = CCA_SO.fit(EEG_SO, feat_SO)
+    # Pipeline 1: Attended vs. Unattended
+    acc, p_value, acc_sig, corr_att_cv, corr_unatt_cv= pipe_att_or_unatt(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, TRAIN_WITH_ATT=True, V_eeg=V_eeg_SO, V_Stim=V_Stim_SO, figure_dir=figure_dirs['EEG'], trial_len=60, PLOT=True)
+    # Pipeline 2: Compete trials
+    pipe_compete_trials(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dirs['EEG'], V_eeg=V_eeg_SO, V_Stim=V_Stim_SO)
+    # Pipeline 3: Matched vs. Unmatched
+    pipe_mm_trials(Subj_ID, eeg_multisubj_list, objflow_att_list, objflow_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dirs['EEG'], MATCHATT=True, V_eeg=V_eeg_SO, V_Stim=V_Stim_SO, fold=5, n_components=5, nb_comp_into_account=2)
 else:
     # Pipeline 1: Attended vs. Unattended
     # Using EEG data
