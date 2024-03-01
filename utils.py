@@ -224,22 +224,33 @@ def transformed_GEVD(Dxx, Rxx, rho, dimStim, n_components):
     return lam, W
 
 
-def into_trials(data, fs, t=60):
-    # Divide data into t s trials
+def into_trials(data, fs, t=60, start_points=None):
     if np.ndim(data)==1:
         data = np.expand_dims(data, axis=1)
     T = data.shape[0]
-    # if T is not a multiple of t sec, then discard the last few samples
-    T_trunc = T - T%(fs*t)
-    if np.ndim(data)==2:
-        data_intmin = data[:T_trunc,:]
-    elif np.ndim(data)==3:
-        data_intmin = data[:T_trunc,:,:]
+    if start_points is not None:
+        # has a target number of trials with specified start points, then randomly select nb_trials trials
+        # select data from start_points along axis 0
+        data_trials = [data[start:start+fs*t, ...] for start in start_points]
     else:
-        raise ValueError('Wrong Dimension')
-    # segment X_intmin into 1 min trials along axis 0
-    data_trials = np.split(data_intmin, int(T/(fs*t)), axis=0)
+        # does not have a target number of trials, then divide data into t s trials without overlap
+        # if T is not a multiple of t sec, then discard the last few samples
+        T_trunc = T - T%(fs*t)
+        data_intmin = data[:T_trunc, ...]
+        # segment X_intmin into 1 min trials along axis 0
+        data_trials = np.split(data_intmin, int(T/(fs*t)), axis=0)
     return data_trials
+
+
+def select_distractors(data_test, fs, t, start_point, distract_test=None):
+    # the rest of the data is used as distractors
+    if distract_test is not None:
+        data_distractor = np.delete(distract_test, range(start_point, start_point+t*fs), axis=0)
+    else:
+        data_distractor = np.delete(data_test, range(start_point, start_point+t*fs), axis=0)
+    start_points_distractor = np.random.randint(0, len(data_distractor)-t*fs, size=1)[0]
+    seg_distractor = data_distractor[start_points_distractor:start_points_distractor+t*fs, ...]
+    return seg_distractor
 
 
 def shift_trials(data_trials, shift=None):
@@ -351,41 +362,33 @@ def sig_level_binomial_test(p_value, total_trials, p=0.5):
     return sig_level
 
 
-def eval_mm(res_per_fold, nb_comp_into_account=2):
-    nb_folds = len(res_per_fold)
-    res_per_fold = [res[:,:,:nb_comp_into_account] for res in res_per_fold]
-    res_per_fold = [np.max(res, axis=2) for res in res_per_fold]
-    nb_eeg_trials = res_per_fold[0].shape[0]
-    nb_sti_trials = res_per_fold[0].shape[1]
-    if nb_eeg_trials != nb_sti_trials: # with extra distractors
-        for idx in range(nb_folds):
-            for i in range(nb_eeg_trials):
-                res_per_fold[idx][i,i+nb_eeg_trials] = np.inf # Do not consider the distractor that is also on the screen
-        nb_tests = nb_eeg_trials*(nb_sti_trials-2)*nb_folds
-    else:
-        nb_tests = nb_eeg_trials*(nb_sti_trials-1)*nb_folds 
-    match_stim_correct = 0
-    for idx in range(nb_folds):
-        mtx_eeg_stim = res_per_fold[idx]
-        match_stim_mtx = mtx_eeg_stim - np.expand_dims(np.diag(mtx_eeg_stim[:,:nb_eeg_trials]), axis=1) # Given EEG, match stimulus
-        # count the number of elements that are smaller than 0
-        match_stim_correct += np.sum(match_stim_mtx < 0)
-    p_value = binomtest(match_stim_correct, nb_tests, alternative='greater').pvalue
-    acc = match_stim_correct/nb_tests
-    return acc, p_value
+def eval_mm(corr_match_fold, corr_mismatch_fold, nb_comp_into_account=2):
+    corr_match_cv = np.mean(corr_match_fold, axis=0)
+    corr_mismatch_cv = np.mean(corr_mismatch_fold, axis=0)
+    print('Mean corr with match features across trials and folds: ', corr_match_cv[:nb_comp_into_account])
+    print('Mean corr with mismatch features across trials and folds: ', corr_mismatch_cv[:nb_comp_into_account])
+    nb_correct = sum(corr_match_fold[:,:nb_comp_into_account].max(axis=1)>corr_mismatch_fold[:,:nb_comp_into_account].max(axis=1))
+    nb_test = corr_match_fold.shape[0]
+    acc = nb_correct/nb_test
+    p_value = binomtest(nb_correct, nb_test, alternative='greater').pvalue
+    acc_sig = sig_level_binomial_test(0.05, nb_test)
+    print('Accuracy: ', acc, ' p-value: ', p_value, 'Number of tests: ', nb_test)
+    return acc, p_value, acc_sig
 
 
-def eval_compete(corr_att_fold, corr_unatt_fold, nb_comp_into_account=2):
+def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_account=2):
+    nb_test = corr_att_fold.shape[0]
     corr_att_cv = np.mean(corr_att_fold, axis=0)
     corr_unatt_cv = np.mean(corr_unatt_fold, axis=0)
     print('Mean corr with attended features across trials and folds: ', corr_att_cv[:nb_comp_into_account])
     print('Mean corr with unattended features across trials and folds: ', corr_unatt_cv[:nb_comp_into_account])
     nb_correct = sum(corr_att_fold[:,:nb_comp_into_account].max(axis=1)>corr_unatt_fold[:,:nb_comp_into_account].max(axis=1))
-    nb_test = corr_att_fold.shape[0]
+    if not TRAIN_WITH_ATT:
+        nb_correct = nb_test - nb_correct
     acc = nb_correct/nb_test
     p_value = binomtest(nb_correct, nb_test, alternative='greater').pvalue
     acc_sig = sig_level_binomial_test(0.05, nb_test)
-    print('Accuracy: ', acc, ' p-value: ', p_value)
+    print('Accuracy: ', acc, ' p-value: ', p_value, 'Number of tests: ', nb_test)
     return acc, p_value, acc_sig, corr_att_cv, corr_unatt_cv
 
 
