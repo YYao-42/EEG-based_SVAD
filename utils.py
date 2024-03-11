@@ -224,6 +224,58 @@ def transformed_GEVD(Dxx, Rxx, rho, dimStim, n_components):
     return lam, W
 
 
+def into_blocks(X, nb_blocks):
+    # Divide tensor into blocks along zeroth axis
+    if X.ndim == 1:
+        X = np.expand_dims(X, axis=1)
+    X_dim = X.shape
+    remainder = X_dim[0] % nb_blocks
+    # discard remainder
+    if remainder > 0:
+        X_dividable = X[:-remainder]
+    else:
+        X_dividable = X
+    blocks = np.split(X_dividable, nb_blocks)
+    return blocks
+
+
+def get_val_set_single(nested_data, fold, fold_val):
+    '''
+    Get validation set from [EEG_i, Vis_i]
+    '''
+    # Get [[EEG_i_fold_1, ...], [Vis_i_fold_1, ...]]
+    nested_fold_list = [into_blocks(mod, fold) for mod in nested_data]
+    # rest_list: [EEG_i_rest, Vis_i_rest] val_list: [EEG_i_val, Vis_i_val]
+    rest_list, val_list, _, _ = split_mm_balance(nested_fold_list, fold_val, fold_idx=fold_val)
+    return rest_list, val_list
+
+
+def get_val_set(nested_datalist, fold, fold_val, crs_val):
+    '''
+    Get validation set from nested data list [[EEG_1, EEG_2, ...], [Vis_1, Vis_2, ...]]
+    Return:
+    nested_restlist: [[EEG_1_rest, EEG_2_rest, ...], [Vis_1_rest, Vis_2_rest, ...]]
+    nested_vallist: [[EEG_1_val, EEG_2_val, ...], [Vis_1_val, Vis_2_val, ...]]
+    rest_list: [EEG_rest, Vis_rest] 
+    val_list: [EEG_val, Vis_val]
+    '''
+    if not crs_val:
+        rest_list, val_list, nested_restlist, nested_vallist = split_mm_balance(nested_datalist, fold_val, fold_idx=fold_val)
+    else:
+        nb_videos = len(nested_datalist[0])
+        nested_restlist = [[],[]]
+        nested_vallist = [[],[]]
+        for i in range(nb_videos):
+            nested_data = [nested_datalist[0][i], nested_datalist[1][i]]
+            rest_list, val_list = get_val_set_single(nested_data, fold, fold_val)
+            nested_restlist[0].append(rest_list[0])
+            nested_restlist[1].append(rest_list[1])
+            nested_vallist[0].append(val_list[0])
+            nested_vallist[1].append(val_list[1])
+        rest_list = [np.concatenate(tuple(mod), axis=0) for mod in nested_restlist]
+        val_list = [np.concatenate(tuple(mod), axis=0) for mod in nested_vallist]
+    return nested_restlist, nested_vallist, rest_list, val_list
+
 def into_trials(data, fs, t=60, start_points=None):
     if np.ndim(data)==1:
         data = np.expand_dims(data, axis=1)
@@ -242,12 +294,13 @@ def into_trials(data, fs, t=60, start_points=None):
     return data_trials
 
 
-def select_distractors(data_test, fs, t, start_point, distract_test=None):
-    # the rest of the data is used as distractors
-    if distract_test is not None:
-        data_distractor = np.delete(distract_test, range(start_point, start_point+t*fs), axis=0)
-    else:
-        data_distractor = np.delete(data_test, range(start_point, start_point+t*fs), axis=0)
+def select_distractors(data, fs, t, start_point):
+    '''
+    Select distractors as the data that are not the target trial (e.g., when 'data' is the attended feature) and not the trial that is shown in the same time as the target trial (e.g., when 'data' is the unattended feature)
+    '''
+    # remove the target trial from the data
+    data_distractor = np.delete(data, range(start_point, start_point+t*fs), axis=0)
+    # randomly select one trial from the rest of the data
     start_points_distractor = np.random.randint(0, len(data_distractor)-t*fs, size=1)[0]
     seg_distractor = data_distractor[start_points_distractor:start_points_distractor+t*fs, ...]
     return seg_distractor
@@ -913,3 +966,18 @@ def check_alignment(subj_ID, eog_multisubj_list, gaze_multisubj_list, nb_points=
         ax[i//nb_cols, i%nb_cols].set_title('Video ' + str(i+1))
         ax[i//nb_cols, i%nb_cols].legend()
     plt.savefig('figures/Overlay/alignment_' + str(subj_ID) + '.png')
+
+
+def remove_saccade(datalist, Sacc, remove_before=15, remove_after=15):
+    T = Sacc.shape[0]
+    # transform the saccade into a binary mask
+    Sacc = Sacc > 0.5
+    # find the indices of the -2 to 2 time points around the saccade
+    idx_remove = np.where(Sacc)[0]
+    idx_remove = np.concatenate([np.arange(i-remove_before, i+remove_after+1) for i in idx_remove])
+    # remove the repeated indices and the indices out of the range
+    idx_remove = np.unique(idx_remove)
+    idx_remove = idx_remove[(idx_remove>=0) & (idx_remove<T)]
+    # remove the time points around the saccade
+    datalist = [np.delete(data, idx_remove, axis=0) for data in datalist]
+    return datalist

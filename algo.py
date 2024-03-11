@@ -255,7 +255,7 @@ class CanonicalCorrelationAnalysis:
         corr_trials = np.sort(abs(corr_trials), axis=None)
         return corr_trials[sig_idx]
 
-    def cross_val(self, trial_len=None, V_eeg=None, V_Stim=None):
+    def cross_val(self, trial_len=None, V_eeg=None, V_Stim=None, saccade_list=None):
         fold = self.fold
         n_components = self.n_components
         corr_train = np.zeros((fold, n_components))
@@ -267,6 +267,9 @@ class CanonicalCorrelationAnalysis:
         for idx in range(fold):
             # EEG_train, EEG_test, Sti_train, Sti_test = split(EEG_list, feature_list, fold=fold, fold_idx=idx+1)
             EEG_train, EEG_test, Sti_train, Sti_test = utils.split_balance(self.EEG_list, self.Stim_list, fold=fold, fold_idx=idx+1)
+            if saccade_list is not None:
+                _, _, _, Sacc_test = utils.split_balance(self.EEG_list, saccade_list, fold=fold, fold_idx=idx+1)
+                [EEG_test, Sti_test] = utils.remove_saccade([EEG_test, Sti_test], Sacc_test)
             if V_eeg is not None:
                 V_A_train, V_B_train = V_eeg, V_Stim
                 corr_train[idx,:], tsc_train[idx], dist_test[idx], _ = self.cal_corr_coe(EEG_train, Sti_train, V_A_train, V_B_train)
@@ -292,7 +295,7 @@ class CanonicalCorrelationAnalysis:
             print('Average correlation coefficients of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
         return corr_train, corr_test, sig_corr, tsc_train, tsc_test, dist_train, dist_test, V_A_train, V_B_train
 
-    def match_mismatch(self, trial_len, nb_trials, feat_distract_list=None, V_eeg=None, V_Stim=None):
+    def match_mismatch(self, trial_len, nb_trials, feat_distract_list=None, V_eeg=None, V_Stim=None, saccade_list=None):
         # always train on match and try to distinguish match from mismatch 
         # mismatch is a random segment that is not shown on the screen
         corr_match_fold = []
@@ -304,14 +307,18 @@ class CanonicalCorrelationAnalysis:
                 _, _, _, _, V_A_train, V_B_train, _ = self.fit(EEG_train, Sti_train)
             else:
                 V_A_train, V_B_train = V_eeg, V_Stim
-            start_points = np.random.randint(0, EEG_test.shape[0]-trial_len*self.fs, size=nb_trials)
-            EEG_trials = utils.into_trials(EEG_test, self.fs, trial_len, start_points=start_points)
-            Match_trials = utils.into_trials(Sti_test, self.fs, trial_len, start_points=start_points)
             if feat_distract_list is not None:
                 _, _, _, Distract_test = utils.split_balance(self.EEG_list, feat_distract_list, fold=fold, fold_idx=idx+1)
             else:
-                Distract_test = None
-            Mismatch_trials = [utils.select_distractors(Sti_test, self.fs, trial_len, start_point, distract_test=Distract_test) for start_point in start_points]
+                Distract_test = Sti_test
+            if saccade_list is not None:
+                _, _, _, Sacc_test = utils.split_balance(self.EEG_list, saccade_list, fold=fold, fold_idx=idx+1)
+                [EEG_test, Sti_test, Distract_test] = utils.remove_saccade([EEG_test, Sti_test, Distract_test], Sacc_test)
+            start_points = np.random.randint(0, EEG_test.shape[0]-trial_len*self.fs, size=nb_trials)
+            EEG_trials = utils.into_trials(EEG_test, self.fs, trial_len, start_points=start_points)
+            Match_trials = utils.into_trials(Sti_test, self.fs, trial_len, start_points=start_points)
+
+            Mismatch_trials = [utils.select_distractors(Distract_test, self.fs, trial_len, start_point) for start_point in start_points]
             corr_match, _, _ = self.cal_corr_coe_trials(EEG_trials, Match_trials, V_A_train, V_B_train, avg=False)
             corr_mismatch, _, _ = self.cal_corr_coe_trials(EEG_trials, Mismatch_trials, V_A_train, V_B_train, avg=False)
             corr_match_fold.append(corr_match)
@@ -320,16 +327,26 @@ class CanonicalCorrelationAnalysis:
         corr_mismatch_fold = np.concatenate(tuple(corr_mismatch_fold), axis=0)
         return corr_match_fold, corr_mismatch_fold
 
-    def att_or_unatt(self, feat_unatt_list, trial_len, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, nb_trials=None):
+    def att_or_unatt(self, feat_unatt_list, trial_len, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, nb_trials=None, saccade_list=None):
         # train on attended data and try to decode the attended object
         # train on unattended data and try to decode the unattended object
         # attended and unattended data are both shown on the screen
         corr_att_fold = []
         corr_unatt_fold = []
         fold = self.fold
+        # EEG_all = np.concatenate(tuple(self.EEG_list), axis=0)
+        # Att_all = np.concatenate(tuple(self.Stim_list), axis=0)
+        # Unatt_all = np.concatenate(tuple(feat_unatt_list), axis=0)
+        # Sacc_all = np.concatenate(tuple(saccade_list), axis=0)
         for idx in range(fold):
+            # EEG_train, EEG_test, Att_train, Att_test = utils.split(EEG_all, Att_all, fold=fold, fold_idx=idx+1)
+            # _, _, Unatt_train, Unatt_test = utils.split(EEG_all, Unatt_all, fold=fold, fold_idx=idx+1)
             EEG_train, EEG_test, Att_train, Att_test = utils.split_balance(self.EEG_list, self.Stim_list, fold=fold, fold_idx=idx+1)
             _, _, Unatt_train, Unatt_test = utils.split_balance(self.EEG_list, feat_unatt_list, fold=fold, fold_idx=idx+1)
+            if saccade_list is not None:
+                # _, _, _, Sacc_test = utils.split(EEG_all, Sacc_all, fold=fold, fold_idx=idx+1)
+                _, _, _, Sacc_test = utils.split_balance(self.EEG_list, saccade_list, fold=fold, fold_idx=idx+1)
+                [EEG_test, Att_test, Unatt_test] = utils.remove_saccade([EEG_test, Att_test, Unatt_test], Sacc_test)
             if V_eeg is None:
                 if TRAIN_WITH_ATT:
                     _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
