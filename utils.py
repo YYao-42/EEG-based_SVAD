@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import copy
 import pickle
 import os
+import pandas as pd
 from numpy import linalg as LA
 from scipy import signal
 from scipy.linalg import toeplitz, eig, eigh, sqrtm, lstsq
@@ -113,7 +114,7 @@ def extract_freq_band(eeg, fs, band):
     return eeg_band
 
 
-def Hankel_mtx(L_timefilter, x, offset=0):
+def Hankel_mtx(L_timefilter, x, offset=0, mask=None):
     '''
     Calculate the Hankel matrix
     Convolution: y(t)=x(t)*h(t)
@@ -133,19 +134,22 @@ def Hankel_mtx(L_timefilter, x, offset=0):
             ...
     x(T)   x(T-1) x(T-2)
     Unknown values are set as 0
+    If mask is not None, then discard the rows indicated by mask
+    This is useful when we want to remove segments (e.g., blinks, saccades) in the signals.
     '''
     first_col = np.zeros(L_timefilter)
     first_col[0] = x[0]
-    if offset == 0:
-        hankel_mtx = np.transpose(toeplitz(first_col, x))
-    else:
+    if offset != 0:
         x = np.append(x, [np.zeros((1,offset))])
-        hankel_mtx = np.transpose(toeplitz(first_col, x))
+    hankel_mtx = np.transpose(toeplitz(first_col, x))
+    if offset != 0:
         hankel_mtx = hankel_mtx[offset:,:]
+    if mask is not None:
+        hankel_mtx = hankel_mtx[mask,:]
     return hankel_mtx
 
 
-def block_Hankel(X, L, offset=0):
+def block_Hankel(X, L, offset=0, mask=None):
     '''
     For spatial-temporal filter, calculate the block Hankel matrix
     Inputs:
@@ -155,11 +159,8 @@ def block_Hankel(X, L, offset=0):
     '''
     if np.ndim(X) == 1:
         X = np.expand_dims(X, axis=1)
-    if L == 1:
-        blockHankel = X
-    else:
-        Hankel_list = [Hankel_mtx(L, X[:,i], offset) for i in range(X.shape[1])]
-        blockHankel = np.concatenate(tuple(Hankel_list), axis=1)
+    Hankel_list = [Hankel_mtx(L, X[:,i], offset, mask) for i in range(X.shape[1])]
+    blockHankel = np.concatenate(tuple(Hankel_list), axis=1)
     return blockHankel
 
 
@@ -295,11 +296,10 @@ def into_trials(data, fs, t=60, start_points=None):
 
 
 def select_distractors(data, fs, t, start_point):
-    '''
-    Select distractors as the data that are not the target trial (e.g., when 'data' is the attended feature) and not the trial that is shown in the same time as the target trial (e.g., when 'data' is the unattended feature)
-    '''
+    adjacent_start = max(start_point - fs, 0)
+    adjacent_end = min(start_point + (t+1)*fs, data.shape[0])
     # remove the target trial from the data
-    data_distractor = np.delete(data, range(start_point, start_point+t*fs), axis=0)
+    data_distractor = np.delete(data, range(adjacent_start, adjacent_end), axis=0)
     # randomly select one trial from the rest of the data
     start_points_distractor = np.random.randint(0, len(data_distractor)-t*fs, size=1)[0]
     seg_distractor = data_distractor[start_points_distractor:start_points_distractor+t*fs, ...]
@@ -735,7 +735,7 @@ def clean_features(feats, smooth=True):
     return y
 
 
-def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=False, ifeps=False, idx_sig=None):
+def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=False, idx_sig=None):
     _, n_components = forward_model.shape
     biosemi_layout = mne.channels.read_layout('biosemi')
     create_info = mne.create_info(biosemi_layout.names, ch_types='eeg', sfreq=30)
@@ -769,16 +769,56 @@ def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=Fa
         comp += 1
     cbar_ax = fig.add_axes([0.85, 0.3, 0.02, 0.5])
     fig.colorbar(im, cax=cbar_ax, label='Weight')
-    if ifeps:
-        plt.savefig(file_name, format='eps')
-    else:
-        plt.savefig(file_name, dpi=600)
+    plt.savefig(file_name, dpi=600)
     plt.close()
 
 
-def create_dir(path):
+def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, sig_corr_fold, file_name, AVG=False):
+    n_components = forward_model_fold[0].shape[1]
+    if AVG:
+        corr_att_fold = np.mean(corr_att_fold, axis=0, keepdims=1)
+        if corr_unatt_fold is not None:
+            corr_unatt_fold = np.mean(corr_unatt_fold, axis=0, keepdims=1)
+        sig_corr_fold = [np.mean(sig_corr_fold)]
+        forward_model_fold = [np.abs(fm) for fm in forward_model_fold]
+        forward_model_fold = [np.mean(forward_model_fold, axis=0)]
+        file_name = file_name.replace('Folds', 'Avg')
+    biosemi_layout = mne.channels.read_layout('biosemi')
+    create_info = mne.create_info(biosemi_layout.names, ch_types='eeg', sfreq=30)
+    create_info.set_montage('biosemi64')
+    vmax = np.max([np.max(np.abs(fm)) for fm in forward_model_fold])
+    vmin = np.min([np.min(np.abs(fm)) for fm in forward_model_fold])
+    n_rows = len(forward_model_fold)
+    n_cols = n_components
+    fig_size = (n_cols*2, n_rows*2.5)
+    fig, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=fig_size)
+    fig.tight_layout()
+    fig.subplots_adjust(right=0.8)
+    # plot each component
+    for i in range(n_rows):
+        for j in range(n_cols):
+            ax = axes[i, j] if not AVG else axes[j]
+            im, _ = mne.viz.plot_topomap(np.abs(forward_model_fold[i][:,j]), create_info, ch_type='eeg', axes=ax, show=False, vlim=(vmin, vmax))
+            if corr_unatt_fold is not None:
+                ax.set_title("Att: {corr_att:.3f}\n UnAtt: {corr_unatt:.3f}".format(corr_att=corr_att_fold[i,j], corr_unatt=corr_unatt_fold[i,j]), color='black')
+            else:
+                ax.set_title("Corr: {corr:.3f}".format(corr=corr_att_fold[i,j]), color='black')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if j == 0:  # add row title to the first subplot in each row
+                ax.set_ylabel("Sig: {sig:.3f}".format(sig=sig_corr_fold[i]), fontsize=12)
+    cbar_ax = fig.add_axes([0.85, 0.3, 0.02, 0.5])
+    fig.colorbar(im, cax=cbar_ax, label='Weight')
+    plt.savefig(file_name, dpi=600)
+    plt.close()
+
+
+def create_dir(path, CLEAR=False):
     if not os.path.exists(path):
         os.makedirs(path)
+    if CLEAR:
+        for file in os.listdir(path):
+            os.remove(path + file)
 
 
 def get_features(feats_path_folder, video_id, len_seg, offset=None, smooth=True):
@@ -968,11 +1008,52 @@ def check_alignment(subj_ID, eog_multisubj_list, gaze_multisubj_list, nb_points=
     plt.savefig('figures/Overlay/alignment_' + str(subj_ID) + '.png')
 
 
-def remove_saccade(datalist, Sacc, remove_before=15, remove_after=15):
+def calcu_gaze_velocity(gaze):
+    if np.ndim(gaze) == 2:
+        gaze = np.expand_dims(gaze, axis=2)
+    _, D, _ = gaze.shape
+    if D > 2:
+        gaze = gaze[:,:2,:]
+    pos_diff = np.diff(gaze, axis=0, prepend=np.expand_dims(gaze[0,:], axis=0))
+    gaze_velocity = np.sqrt(np.sum(pos_diff**2, axis=1, keepdims=True))
+    return gaze_velocity
+
+
+def calcu_gaze_vel_from_EOG(eog):
+    if np.ndim(eog) == 2:
+        eog = np.expand_dims(eog, axis=2)
+    eog_y = eog[:,0,:] - eog[:,1,:]
+    eog_x = eog[:,2,:] - eog[:,3,:]
+    eog_xy = np.stack((eog_x, eog_y), axis=1)
+    gaze_velocity = calcu_gaze_velocity(eog_xy)
+    return gaze_velocity
+    
+
+def refine_saccades(saccade_multisubj_list, blink_multisubj_list):
+    saccade_multisubj_list = [saccade_multisubj.astype(bool) for saccade_multisubj in saccade_multisubj_list]
+    blink_multisubj_list = [blink_multisubj.astype(bool) for blink_multisubj in blink_multisubj_list]
+    saccade_multisubj_list = [np.logical_xor(np.logical_and(saccade_multisubj, blink_multisubj), saccade_multisubj) for saccade_multisubj, blink_multisubj in zip(saccade_multisubj_list, blink_multisubj_list)]
+    saccade_multisubj_list = [saccade.astype(float) for saccade in saccade_multisubj_list]
+    return saccade_multisubj_list
+
+def get_mask_list(Sacc_list, before=15, after=30):
+    mask_list = []
+    for Sacc in Sacc_list:
+        T = Sacc.shape[0]
+        Sacc = Sacc > 0.5
+        idx_surround = np.where(Sacc)[0]
+        idx_surround = np.concatenate([np.arange(i-before, i+after+1) for i in idx_surround])
+        idx_surround = np.unique(idx_surround)
+        idx_surround = idx_surround[(idx_surround>=0) & (idx_surround<T)]
+        Sacc[idx_surround] = True
+        mask_list.append(np.logical_not(Sacc))
+    return mask_list
+
+def remove_saccade(datalist, Sacc, remove_before=15, remove_after=30):
     T = Sacc.shape[0]
     # transform the saccade into a binary mask
     Sacc = Sacc > 0.5
-    # find the indices of the -2 to 2 time points around the saccade
+    # find the indices of the points around the saccade
     idx_remove = np.where(Sacc)[0]
     idx_remove = np.concatenate([np.arange(i-remove_before, i+remove_after+1) for i in idx_remove])
     # remove the repeated indices and the indices out of the range
@@ -981,3 +1062,49 @@ def remove_saccade(datalist, Sacc, remove_before=15, remove_after=15):
     # remove the time points around the saccade
     datalist = [np.delete(data, idx_remove, axis=0) for data in datalist]
     return datalist
+
+
+def interpolate_blinks(time_series, blinks):
+    '''
+    Interpolate the time series around the blinks indicated by the binary mask
+    '''
+    # Transform the blinks into a binary mask
+    blinks = blinks > 0.5
+    # Set the indices of the blinks to NaN
+    time_series[blinks, ...] = np.nan
+    if np.ndim(time_series) == 2:
+        time_series = clean_features(time_series, smooth=False)
+    else:
+        for i in range(time_series.shape[2]):
+            time_series[:,:,i] = clean_features(time_series[:,:,i], smooth=False)
+    return time_series
+    
+
+def create_corr_df(Subj_ID, sig_corr_fold, corr_att_fold, corr_unatt_fold):
+    sig_level = np.average(sig_corr_fold)
+    corr_att = np.average(corr_att_fold, axis=0)
+    corr_unatt = np.average(corr_unatt_fold, axis=0)
+    n_component = len(corr_att)
+    index = pd.MultiIndex.from_tuples([
+        ('Subj '+str(Subj_ID+1), sig_level, 'CC {}'.format(i+1))
+        for i in range(n_component)
+    ], names=['Subject ID', 'Sig Level', 'Component'])
+    data = {
+        'Att': corr_att,
+        'Unatt': corr_unatt
+    }
+    corr_df = pd.DataFrame(data, index=index)
+    return corr_df
+
+
+def create_acc_df(Subj_ID, trial_len_list, acc_list):
+    columns = ['Subject ID'] + ['Trial_len='+str(tl) for tl in trial_len_list]
+    data = ['Subj '+str(Subj_ID+1)] + acc_list
+    acc_df = pd.DataFrame([data], columns=columns)
+    return acc_df
+
+
+def read_res(table_dir, res, train_type):
+    table_name = table_dir + f'{res}_Train_{train_type}.csv'
+    res_df = pd.read_csv(table_name, header=0, index_col=[0,1,2])
+    return res_df
