@@ -79,7 +79,7 @@ class LeastSquares:
 
 
 class CanonicalCorrelationAnalysis:
-    def __init__(self, EEG_list, Stim_list, fs, L_EEG, L_Stim, offset_EEG=0, offset_Stim=0, mask_list=None, fold=10, n_components=5, regularization='lwcov', K_regu=None, message=True, signifi_level=True, n_permu=1000, p_value=0.05, dim_subspace=2):
+    def __init__(self, EEG_list, Stim_list, fs, L_EEG, L_Stim, offset_EEG=0, offset_Stim=0, mask_list=None, fold=10, leave_out=2, n_components=5, regularization='lwcov', K_regu=None, message=True, signifi_level=True, n_permu=1000, p_value=0.05, dim_subspace=2):
         '''
         EEG_list: list of EEG data, each element is a T(#sample)xDx(#channel) array
         Stim_list: list of stimulus, each element is a T(#sample)xDy(#feature dim) array
@@ -101,6 +101,7 @@ class CanonicalCorrelationAnalysis:
         self.offset_Stim = offset_Stim
         self.mask_list = mask_list
         self.fold = fold
+        self.leave_out = leave_out
         self.n_components = n_components
         self.regularization = regularization
         self.K_regu = K_regu
@@ -122,7 +123,7 @@ class CanonicalCorrelationAnalysis:
             mask_EEG = copy.deepcopy(mask)
             mask_Stim = copy.deepcopy(mask)
             mask_EEG = (mask_EEG + self.offset_EEG*[True])[self.offset_EEG:]
-            mask_Stim = mask_Stim + self.offset_Stim*[True][self.offset_Stim:]
+            mask_Stim = (mask_Stim + self.offset_Stim*[True])[self.offset_Stim:]
             mask_lags_EEG = copy.deepcopy(mask_EEG)
             mask_lags_Stim = copy.deepcopy(mask_Stim)
             for i in range(len(mask)):
@@ -436,20 +437,20 @@ class CanonicalCorrelationAnalysis:
     def cross_val_LVO(self, V_eeg=None, V_Stim=None):
         nb_videos = len(self.Stim_list)
         n_components = self.n_components
-        corr_train_fold = np.zeros((nb_videos//2, n_components))
-        corr_test_fold = np.zeros((nb_videos//2, n_components))
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list, self.Stim_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, self.Stim_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
+        corr_train_fold = np.zeros((nb_folds, n_components))
+        corr_test_fold = np.zeros((nb_folds, n_components))
         sig_corr_fold = []
         forward_model_fold = []
-        for i in range(0, nb_videos, 2):
-            indices_train = [j for j in range(nb_videos) if j not in [i, i+1]]
-            EEG_train = np.concatenate(tuple([self.EEG_list[j] for j in indices_train]), axis=0)
-            EEG_test = np.concatenate((self.EEG_list[i], self.EEG_list[i+1]), axis=0)
-            Sti_train = np.concatenate(tuple([self.Stim_list[j] for j in indices_train]), axis=0)
-            Sti_test = np.concatenate((self.Stim_list[i], self.Stim_list[i+1]), axis=0)
+        for idx in range(0, nb_folds):
             if self.mask_list is not None:
-                self.mask_train = np.concatenate(tuple([self.mask_list[j] for j in indices_train]), axis=0)
-                self.mask_test = np.concatenate((self.mask_list[i], self.mask_list[i+1]), axis=0)
-            idx = i//2
+                [EEG_train, Sti_train, self.mask_train], [EEG_test, Sti_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            else:
+                [EEG_train, Sti_train], [EEG_test, Sti_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is not None:
                 V_A_train, V_B_train = V_eeg, V_Stim
                 corr_train_fold[idx,:], _, _, _ = self.cal_corr_coe(EEG_train, Sti_train, V_A_train, V_B_train)
@@ -471,17 +472,18 @@ class CanonicalCorrelationAnalysis:
         # always train on match and try to distinguish match from mismatch 
         # mismatch is a random segment that is not shown on the screen
         nb_videos = len(self.Stim_list)
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list, self.Stim_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, self.Stim_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
         corr_match_eeg = []
         corr_mismatch_eeg = []
-        for i in range(0, nb_videos, 2):
-            indices_train = [j for j in range(nb_videos) if j not in [i, i+1]]
-            EEG_train = np.concatenate(tuple([self.EEG_list[j] for j in indices_train]), axis=0)
-            EEG_test = np.concatenate((self.EEG_list[i], self.EEG_list[i+1]), axis=0)
-            Sti_train = np.concatenate(tuple([self.Stim_list[j] for j in indices_train]), axis=0)
-            Sti_test = np.concatenate((self.Stim_list[i], self.Stim_list[i+1]), axis=0)
+        for idx in range(0, nb_folds):
             if self.mask_list is not None:
-                self.mask_train = np.concatenate(tuple([self.mask_list[j] for j in indices_train]), axis=0)
-                self.mask_test = np.concatenate((self.mask_list[i], self.mask_list[i+1]), axis=0)
+                [EEG_train, Sti_train, self.mask_train], [EEG_test, Sti_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            else:
+                [EEG_train, Sti_train], [EEG_test, Sti_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is None:
                 _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Sti_train)
             else:
@@ -506,24 +508,23 @@ class CanonicalCorrelationAnalysis:
         # train on attended data and try to decode the attended object
         # train on unattended data and try to decode the unattended object
         # attended and unattended data are both shown on the screen
+        feat_att_list = self.Stim_list
+        nb_videos = len(feat_att_list)
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list, feat_att_list, feat_unatt_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, feat_att_list, feat_unatt_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
         corr_att_fold = []
         corr_unatt_fold = []
         sig_corr_fold = []
         forward_model_fold = []
         
-        feat_att_list = self.Stim_list
-        nb_videos = len(feat_att_list)
-        for i in range(0, nb_videos, 2):
-            indices_train = [j for j in range(nb_videos) if j not in [i, i+1]]
-            EEG_train = np.concatenate(tuple([self.EEG_list[j] for j in indices_train]), axis=0)
-            EEG_test = np.concatenate((self.EEG_list[i], self.EEG_list[i+1]), axis=0)
-            Att_train = np.concatenate(tuple([feat_att_list[j] for j in indices_train]), axis=0)
-            Att_test = np.concatenate((feat_att_list[i], feat_att_list[i+1]), axis=0)
-            Unatt_train = np.concatenate(tuple([feat_unatt_list[j] for j in indices_train]), axis=0)
-            Unatt_test = np.concatenate((feat_unatt_list[i], feat_unatt_list[i+1]), axis=0)
+        for idx in range(0, nb_folds):
             if self.mask_list is not None:
-                self.mask_train = np.concatenate(tuple([self.mask_list[j] for j in indices_train]), axis=0)
-                self.mask_test = np.concatenate((self.mask_list[i], self.mask_list[i+1]), axis=0)
+                [EEG_train, Att_train, Unatt_train, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            else:
+                [EEG_train,  Att_train, Unatt_train], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is None:
                 if TRAIN_WITH_ATT:
                     _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
@@ -571,24 +572,24 @@ class CanonicalCorrelationAnalysis:
     def att_or_unatt_LVO_trials(self, feat_unatt_list, trial_len, BOOTSTRAP=True, V_eeg=None, V_Stim=None):
         feat_att_list = self.Stim_list
         nb_videos = len(feat_att_list)
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list, feat_att_list, feat_unatt_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, feat_att_list, feat_unatt_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
         corr_att_eeg = []
         corr_unatt_eeg = []
-        for i in range(0, nb_videos, 2):
-            indices_train = [j for j in range(nb_videos) if j not in [i, i+1]]
-            EEG_train = np.concatenate(tuple([self.EEG_list[j] for j in indices_train]), axis=0)
-            EEG_test = np.concatenate((self.EEG_list[i], self.EEG_list[i+1]), axis=0)
-            Att_train = np.concatenate(tuple([feat_att_list[j] for j in indices_train]), axis=0)
-            Att_test = np.concatenate((feat_att_list[i], feat_att_list[i+1]), axis=0)
-            Unatt_test = np.concatenate((feat_unatt_list[i], feat_unatt_list[i+1]), axis=0)
+        for idx in range(0, nb_folds):
             if self.mask_list is not None:
-                self.mask_train = np.concatenate(tuple([self.mask_list[j] for j in indices_train]), axis=0)
-                self.mask_test = np.concatenate((self.mask_list[i], self.mask_list[i+1]), axis=0)
+                [EEG_train, Att_train, _, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            else:
+                [EEG_train,  Att_train, _], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is None:
                 _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
             else:
                  V_eeg_train, V_feat_train = V_eeg, V_Stim
-            EEG_trans, Att_trans = self.get_transformed_data(EEG_test, Att_test,  V_eeg_train, V_feat_train)
-            _, Unatt_trans = self.get_transformed_data(EEG_test, Unatt_test,  V_eeg_train, V_feat_train)
+            EEG_trans, Att_trans = self.get_transformed_data(EEG_test, Att_test, V_eeg_train, V_feat_train)
+            _, Unatt_trans = self.get_transformed_data(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
             if BOOTSTRAP:
                 nb_trials = EEG_trans.shape[0]//self.fs * 2
                 start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
@@ -607,7 +608,7 @@ class CanonicalCorrelationAnalysis:
 
 
 class GeneralizedCCA:
-    def __init__(self, EEG_list, fs, L, offset, fold=10, n_components=5, regularization='lwcov', message=True, signifi_level=True, pool=True, n_permu=1000, p_value=0.05, trials=False, dim_subspace=4, save_W_perfold=False, crs_val=True):
+    def __init__(self, EEG_list, fs, L, offset, fold=10, leave_out=2, n_components=5, regularization='lwcov', message=True, signifi_level=True, pool=True, n_permu=1000, p_value=0.05, trials=False, dim_subspace=4, save_W_perfold=False, crs_val=True):
         '''
         EEG_list: list of EEG data, each element is a T(#sample)xDx(#channel) array
         fs: Sampling rate
@@ -628,6 +629,7 @@ class GeneralizedCCA:
         self.L = L
         self.offset = offset
         self.fold = fold
+        self.leave_out = leave_out
         self.n_components = n_components
         self.regularization = regularization
         self.message = message
@@ -792,6 +794,12 @@ class GeneralizedCCA:
             corr_coe_topK = np.concatenate((corr_coe_topK, np.mean(corr_coe_trials, axis=0, keepdims=True)), axis=0)
         return corr_coe_topK
 
+    def calculate_sig_corr(self, corr_trials):
+        assert self.n_components*self.n_permu == corr_trials.shape[0]*corr_trials.shape[1]
+        sig_idx = -int(self.n_permu*self.p_value*self.n_components)
+        corr_trials = np.sort(abs(corr_trials), axis=None)
+        return corr_trials[sig_idx]
+
     def cross_val(self):
         fold = self.fold
         n_components = self.n_components
@@ -848,6 +856,38 @@ class GeneralizedCCA:
             print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_train, axis=0)))
             print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test, axis=0)))
         return corr_train, corr_test, cov_train, cov_test, tsc_train, tsc_test, dist_train, dist_test, W_train, F_train
+    
+    def cross_val_LVO(self):
+        nb_videos = len(self.EEG_list)
+        n_components = self.n_components
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
+        corr_train_fold = np.zeros((nb_folds, n_components))
+        corr_test_fold = np.zeros((nb_folds, n_components))
+        sig_corr_fold = []
+        forward_model_fold = []
+        cov_train_fold = np.zeros((nb_folds, n_components))
+        cov_test_fold = np.zeros((nb_folds, n_components))
+        tsc_train_fold = np.zeros((nb_folds, 1))
+        tsc_test_fold = np.zeros((nb_folds, 1))
+        for idx in range(0, nb_folds):
+            [EEG_train], [EEG_test] = train_list_folds[idx], test_list_folds[idx]
+            W_train, _, _, _ = self.fit(EEG_train)
+            corr_train_fold[idx,:], cov_train_fold[idx,:], _, tsc_train_fold[idx] = self.avg_stats(EEG_train, W_train)
+            corr_test_fold[idx,:], cov_test_fold[idx,:], _, tsc_test_fold[idx] = self.avg_stats(EEG_test, W_train)
+            forward_model = self.forward_model(EEG_test, W_train)
+            forward_model_fold.append(forward_model)
+            corr_trials = self.permutation_test(EEG_test, W_train, block_len=1)
+            sig_corr = self.calculate_sig_corr(corr_trials)
+            sig_corr_fold.append(sig_corr)
+        if self.message:
+            print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_train_fold, axis=0)))
+            print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test_fold, axis=0)))
+            print('Significance level: {}'.format(np.average(sig_corr_fold)))
+        return corr_train_fold, corr_test_fold, cov_train_fold, cov_test_fold, tsc_train_fold, tsc_test_fold, sig_corr_fold, forward_model_fold
     
 
 class CorrelatedComponentAnalysis(GeneralizedCCA):

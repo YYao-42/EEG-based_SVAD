@@ -381,6 +381,24 @@ def split_multi_mod(datalist, fold=10, fold_idx=1):
     return train_list, test_list
 
 
+def split_multi_mod_LVO(nested_datalist, leave_out=2):
+    '''
+    Datasets are organized in nested datalist: [[EEG_1, EEG_2, ... ], [Vis_1, Vis_2, ... ], [Sd_1, Sd_2, ... ]]
+    Create training and test lists for leave-one-video-out cross-validation
+    - A training list: [[EEG_train, Vis_train, Sd_train]_1, [EEG_train, Vis_train, Sd_train]_2, ...]
+    - A test list: [[EEG_test, Vis_test, Sd_test]_1, [EEG_test, Vis_test, Sd_test]_2, ...]
+    '''
+    nb_videos = len(nested_datalist[0])
+    train_list_folds = []
+    test_list_folds = []
+    for i in range(0, nb_videos, leave_out):
+        indices_train = [j for j in range(nb_videos) if j not in range(i, i+leave_out)]
+        indices_test = [j for j in range(i, i+leave_out)]
+        train_list_folds.append([np.concatenate(tuple([mod[i] for i in indices_train]), axis=0) for mod in nested_datalist])
+        test_list_folds.append([np.concatenate(tuple([mod[i] for i in indices_test]), axis=0) for mod in nested_datalist])
+    return train_list_folds, test_list_folds
+
+
 def split_mm_balance(nested_datalist, fold=10, fold_idx=1):
     '''
     Datasets are organized in nested datalist: [[EEG_1, EEG_2, ... ], [Vis_1, Vis_2, ... ], [Sd_1, Sd_2, ... ]]
