@@ -12,6 +12,7 @@ from scipy import signal
 from scipy.linalg import toeplitz, eig, eigh, sqrtm, lstsq
 from scipy.sparse.linalg import eigs
 from scipy.stats import zscore, pearsonr, binomtest, binom
+from sklearn.covariance import LedoitWolf
 
 
 def eig_sorted(X, option='descending'):
@@ -77,6 +78,23 @@ def regress_out(X, Y):
     else:
         raise ValueError('Check the dimension of X')
     return X_res
+
+
+def get_cov_mtx(X, dim_list, regularization=None):
+    '''
+    Get the covariance matrix of X (T x dimX) with or without regularization
+    dim_ilst is a list of dimensions of each modality (data from different subjects can also be viewed as different modalities)
+    sum(dim_list) = dimX
+    '''
+    Rxx = np.cov(X, rowvar=False)
+    Dxx = np.zeros_like(Rxx)
+    dim_accumu = 0
+    for dim in dim_list:
+        if regularization == 'lwcov':
+            Rxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim] = LedoitWolf().fit(X[:, dim_accumu:dim_accumu+dim]).covariance_
+        Dxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim] = Rxx[dim_accumu:dim_accumu+dim, dim_accumu:dim_accumu+dim]
+        dim_accumu += dim
+    return Rxx, Dxx
 
 
 def bandpass(data, fs, band):
@@ -164,9 +182,9 @@ def block_Hankel(X, L, offset=0, mask=None):
     return blockHankel
 
 
-def hankelize_eeg_multisub(eeg_multisub, L, offset):
-    N = eeg_multisub.shape[2]
-    X_list = [block_Hankel(eeg_multisub[:,:,n], L, offset) for n in range(N)]
+def hankelize_data_multisub(data_multisub, L, offset):
+    N = data_multisub.shape[2]
+    X_list = [block_Hankel(data_multisub[:,:,n], L, offset) for n in range(N)]
     X_list = [np.expand_dims(X, axis=2) for X in X_list]
     X = np.concatenate(tuple(X_list), axis=2)
     return X
@@ -791,8 +809,9 @@ def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=Fa
     plt.close()
 
 
-def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, sig_corr_fold, file_name, AVG=False):
+def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, sig_corr_fold, file_name, AVG=False, ISC=False):
     n_components = forward_model_fold[0].shape[1]
+    Prefix = "ISC" if ISC else "Corr"
     if AVG:
         corr_att_fold = np.mean(corr_att_fold, axis=0, keepdims=1)
         if corr_unatt_fold is not None:
@@ -820,7 +839,7 @@ def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, s
             if corr_unatt_fold is not None:
                 ax.set_title("Att: {corr_att:.3f}\n UnAtt: {corr_unatt:.3f}".format(corr_att=corr_att_fold[i,j], corr_unatt=corr_unatt_fold[i,j]), color='black')
             else:
-                ax.set_title("Corr: {corr:.3f}".format(corr=corr_att_fold[i,j]), color='black')
+                ax.set_title("{pref}: {corr:.3f}".format(pref=Prefix, corr=corr_att_fold[i,j]), color='black') 
             ax.set_xticks([])
             ax.set_yticks([])
             if j == 0:  # add row title to the first subplot in each row
@@ -1120,6 +1139,23 @@ def create_acc_df(Subj_ID, trial_len_list, acc_list):
     data = ['Subj '+str(Subj_ID+1)] + acc_list
     acc_df = pd.DataFrame([data], columns=columns)
     return acc_df
+
+
+def create_ISC_df(ISC_fold, ISCov_fold, sig_ISC_fold, mod_name):
+    sig_level = np.average(sig_ISC_fold)
+    ISC = np.average(ISC_fold, axis=0)
+    ISCov = np.average(ISCov_fold, axis=0)
+    n_component = len(ISC)
+    index = pd.MultiIndex.from_tuples([
+        (mod_name, sig_level, 'CC {}'.format(i+1))
+        for i in range(n_component)
+    ], names=['Modality', 'Sig Level (ISC)', 'Component'])
+    data = {
+        'ISC': ISC,
+        'ISCov': ISCov
+    }
+    ISC_df = pd.DataFrame(data, index=index)
+    return ISC_df
 
 
 def read_res(table_dir, res, train_type):
