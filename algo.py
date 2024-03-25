@@ -158,6 +158,8 @@ class CanonicalCorrelationAnalysis:
         Ly = self.L_Stim
         n_components = self.n_components
         mtx_X = utils.block_Hankel(X, Lx, self.offset_EEG, mask)
+        dim_list_X = [d*Lx for d in self.dim_list_EEG] if self.dim_list_EEG is not None else [Dx*Lx]
+        dim_list_Y = [d*Ly for d in self.dim_list_Stim] if self.dim_list_Stim is not None else [Dy*Ly]
         mtx_Y = utils.block_Hankel(Y, Ly, self.offset_Stim, mask)
         if V_A is not None: # Test Mode
             flag_test = True
@@ -166,8 +168,8 @@ class CanonicalCorrelationAnalysis:
             # compute covariance matrices
             covXY = np.cov(mtx_X, mtx_Y, rowvar=False)
             if self.regularization=='lwcov':
-                Rx = LedoitWolf().fit(mtx_X).covariance_
-                Ry = LedoitWolf().fit(mtx_Y).covariance_
+                Rx, _ = utils.get_cov_mtx(mtx_X, dim_list_X, self.regularization)
+                Ry, _ = utils.get_cov_mtx(mtx_Y, dim_list_Y, self.regularization)
             else:
                 Rx = covXY[:Dx*Lx,:Dx*Lx]
                 Ry = covXY[Dx*Lx:Dx*Lx+Dy*Ly,Dx*Lx:Dx*Lx+Dy*Ly]
@@ -500,16 +502,22 @@ class CanonicalCorrelationAnalysis:
                 V_eeg_train, V_feat_train = V_eeg, V_Stim
             EEG_trans, Sti_trans = self.get_transformed_data(EEG_test, Sti_test, V_eeg_train, V_feat_train)
 
-            nb_trials = EEG_trans.shape[0]//self.fs*2
-            start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
-            EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
-            Match_trans_trials = utils.into_trials(Sti_trans, self.fs, trial_len, start_points=start_points)
-            Mismatch_trans_trials = [utils.select_distractors(Sti_trans, self.fs, trial_len, start_point) for start_point in start_points]
-
-            corr_match_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Match_trans_trials)])
-            corr_mismatch_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Mismatch_trans_trials)])
-            corr_match_eeg.append(corr_match_eeg_i)
-            corr_mismatch_eeg.append(corr_mismatch_eeg_i)
+            if EEG_trans.shape[0]-trial_len*self.fs >= 0:
+                nb_trials = EEG_trans.shape[0]//self.fs*2
+                start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+                EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
+                Match_trans_trials = utils.into_trials(Sti_trans, self.fs, trial_len, start_points=start_points)
+                Mismatch_trans_trials = [utils.select_distractors(Sti_trans, self.fs, trial_len, start_point) for start_point in start_points]
+                corr_match_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Match_trans_trials)])
+                corr_mismatch_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Mismatch_trans_trials)])
+                corr_match_eeg.append(corr_match_eeg_i)
+                corr_mismatch_eeg.append(corr_mismatch_eeg_i)
+            else:
+                print('The length of the video is too short for the given trial length.')
+                # return NaN values
+                corr_match_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_mismatch_eeg.append(np.full((1, self.n_components), np.nan))
+        
         corr_match_eeg = np.concatenate(tuple(corr_match_eeg), axis=0)
         corr_mismatch_eeg = np.concatenate(tuple(corr_mismatch_eeg), axis=0)
         return corr_match_eeg, corr_mismatch_eeg
@@ -600,18 +608,24 @@ class CanonicalCorrelationAnalysis:
                  V_eeg_train, V_feat_train = V_eeg, V_Stim
             EEG_trans, Att_trans = self.get_transformed_data(EEG_test, Att_test, V_eeg_train, V_feat_train)
             _, Unatt_trans = self.get_transformed_data(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
-            if BOOTSTRAP:
-                nb_trials = EEG_trans.shape[0]//self.fs * 2
-                start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+            if EEG_trans.shape[0]-trial_len*self.fs >= 0:
+                if BOOTSTRAP:
+                    nb_trials = EEG_trans.shape[0]//self.fs * 2
+                    start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+                else:
+                    start_points = None
+                EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
+                Att_trans_trials = utils.into_trials(Att_trans, self.fs, trial_len, start_points=start_points)
+                Unatt_trans_trials = utils.into_trials(Unatt_trans, self.fs, trial_len, start_points=start_points)
+                corr_att_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Att_trans_trials)])
+                corr_unatt_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Unatt_trans_trials)])
+                corr_att_eeg.append(corr_att_eeg_i)
+                corr_unatt_eeg.append(corr_unatt_eeg_i)
             else:
-                start_points = None
-            EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
-            Att_trans_trials = utils.into_trials(Att_trans, self.fs, trial_len, start_points=start_points)
-            Unatt_trans_trials = utils.into_trials(Unatt_trans, self.fs, trial_len, start_points=start_points)
-            corr_att_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Att_trans_trials)])
-            corr_unatt_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Unatt_trans_trials)])
-            corr_att_eeg.append(corr_att_eeg_i)
-            corr_unatt_eeg.append(corr_unatt_eeg_i)
+                print('The length of the video is too short for the given trial length.')
+                # return NaN values
+                corr_att_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_unatt_eeg.append(np.full((1, self.n_components), np.nan))
         corr_att_eeg = np.concatenate(tuple(corr_att_eeg), axis=0)
         corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
         return corr_att_eeg, corr_unatt_eeg
@@ -905,7 +919,8 @@ class GeneralizedCCA:
 
 class GeneralizedCCA_MultiMod:
     def __init__(self, nested_datalist, fs, L_list, offset_list, fold=10, leave_out=2, n_components=10, regularization='lwcov', message=True, signifi_level=True, n_permu=1000, p_value=0.05, dim_subspace=4):
-        self.nested_datalist = nested_datalist
+        self.nested_datalist = [[data if np.ndim(data)>1 else np.expand_dims(data, axis=1) for data in datalist] for datalist in nested_datalist]
+        self.nested_datalist = [[np.expand_dims(data, axis=2) if np.ndim(data)==2 else data for data in datalist] for datalist in self.nested_datalist]
         self.fs = fs
         self.L_list = L_list
         self.offset_list = offset_list
@@ -922,7 +937,7 @@ class GeneralizedCCA_MultiMod:
     def fit(self, mm_data):
         '''
         Inputs:
-        mm_data: multi-modal data, each element is a T(#sample)xDx(#channel)xN(#subject) array
+        mm_data: multi-modal data, each element is a T(#sample)xDx(#channel)xN(#subject) array or a T(#sample)xDx(#channel) array 
         Outputs:
         lam: eigenvalues, related to mean squared error (not used in analysis)
         W_stack: (Squared_Error_SIGCCAd) weights with shape (D*N*n_components)
@@ -950,28 +965,23 @@ class GeneralizedCCA_MultiMod:
     
     def forward_model(self, EEG_3D, W_EEG_3D):
         T, _, N = EEG_3D.shape
-        EEG_trans_3D = self.get_transformed_data(EEG_3D, W_EEG_3D)
+        EEG_trans_3D = self.get_transformed_data(EEG_3D, W_EEG_3D, self.L_list[0], self.offset_list[0])
         EEG_trans_2D = np.reshape(np.transpose(EEG_trans_3D, (0,2,1)), (T*N,-1), order='F') # concatenate multi-subject data along the time axis
         EEG_2D = np.reshape(np.transpose(EEG_3D, (0,2,1)), (T*N,-1), order='F')
         F = (lstsq(EEG_trans_2D, EEG_2D)[0]).T
         return F
 
     def avg_stats(self, mm_data, W_list):
-        mm_data_3D = [np.expand_dims(data, axis=2) if np.ndim(data)==2 else data for data in mm_data]
-        mm_hankel_3D = [utils.hankelize_data_multisub(data, L, offset) for data, L, offset in zip(mm_data_3D, self.L_list, self.offset_list)]
-        X_stack = np.concatenate(tuple(mm_hankel_3D), axis=1)
-        W_stack = np.concatenate(tuple(W_list), axis=0)
-        _, _, N = X_stack.shape
+        mm_trans_3D = [self.get_transformed_data(data, W, L, offset) for data, W, L, offset in zip(mm_data, W_list, self.L_list, self.offset_list)]
+        mm_trans_3D_concat = np.concatenate(tuple(mm_trans_3D), axis=2)
+        _, _, N = mm_trans_3D_concat.shape
         n_components = self.n_components
         corr_mtx_stack = np.zeros((N,N,n_components))
         cov_mtx_stack = np.zeros((N,N,n_components))
         avg_corr = np.zeros(n_components)
         avg_cov = np.zeros(n_components)
         for component in range(n_components):
-            w = W_stack[:,:,component]
-            w = np.expand_dims(w, axis=1)
-            X_trans = np.einsum('tdn,dln->tln', X_stack, w)
-            X_trans = np.squeeze(X_trans, axis=1)
+            X_trans = mm_trans_3D_concat[:,component,:]
             corr_mtx_stack[:,:,component] = np.corrcoef(X_trans, rowvar=False)
             cov_mtx_stack[:,:,component] = np.cov(X_trans, rowvar=False)
             avg_corr[component] = np.sum(corr_mtx_stack[:,:,component]-np.eye(N))/N/(N-1)
@@ -982,11 +992,11 @@ class GeneralizedCCA_MultiMod:
         avg_ChDist = np.sum(Chordal_dist)/N/(N-1)
         return avg_corr, avg_cov, avg_ChDist, avg_TSC
 
-    def get_transformed_data(self, EEG_3D, W_EEG_3D):
-        EEG_hankel_3D = utils.hankelize_data_multisub(EEG_3D, self.L_list[0], self.offset_list[0])
-        EEG_center_3D = EEG_hankel_3D - np.mean(EEG_hankel_3D, axis=0, keepdims=True)
-        EEG_trans_3D = np.einsum('tdn,dkn->tkn', EEG_center_3D, np.transpose(W_EEG_3D, (0,2,1)))
-        return EEG_trans_3D
+    def get_transformed_data(self, data_3D, W_3D, L, offset):
+        data_hankel_3D = utils.hankelize_data_multisub(data_3D, L, offset)
+        data_center_3D = data_hankel_3D - np.mean(data_hankel_3D, axis=0, keepdims=True)
+        data_trans_3D = np.einsum('tdn,dkn->tkn', data_center_3D, np.transpose(W_3D, (0,2,1)))
+        return data_trans_3D
 
     def get_avg_corr_coe(self, EEG_trans_3D):
         _, _, N = EEG_trans_3D.shape
@@ -1000,7 +1010,7 @@ class GeneralizedCCA_MultiMod:
 
     def permutation_test(self, EEG_3D, W_EEG_3D, block_len):
         corr_coe_topK = np.empty((0, self.n_components))
-        EEG_trans = self.get_transformed_data(EEG_3D, W_EEG_3D)
+        EEG_trans = self.get_transformed_data(EEG_3D, W_EEG_3D, self.L_list[0], self.offset_list[0])
         for i in tqdm(range(self.n_permu)):
             X_shuffled = utils.shuffle_3D(EEG_trans, block_len)
             corr_coe = self.get_avg_corr_coe(X_shuffled)
@@ -1039,11 +1049,11 @@ class GeneralizedCCA_MultiMod:
                 sig_idx = -int(self.n_permu*self.p_value*n_components)
                 sig_level_fold.append(corr_trials[sig_idx])
         if self.message:
-            print('Average ISC_all of the top {} components on the training sets: {}'.format(n_components, np.average(corr_all_train, axis=0)))
-            print('Average ISC_all of the top {} components on the test sets: {}'.format(n_components, np.average(corr_all_test, axis=0)))
-            print('Average ISC_eeg of the top {} components on the training sets: {}'.format(n_components, np.average(corr_eeg_train, axis=0)))
-            print('Average ISC_eeg of the top {} components on the test sets: {}'.format(n_components, np.average(corr_eeg_test, axis=0)))
-            print('Significance level: ISC_EEG={}'.format(np.average(sig_level_fold)))
+            print('Average IMC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_all_train, axis=0)))
+            print('Average IMC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_all_test, axis=0)))
+            print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_eeg_train, axis=0)))
+            print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_eeg_test, axis=0)))
+            print('Significance level: ISC={}'.format(np.average(sig_level_fold)))
         return corr_all_test, cov_all_test, corr_eeg_test, cov_eeg_test, sig_level_fold, forward_model_fold
     
     def cross_val_LVO(self):
@@ -1076,11 +1086,11 @@ class GeneralizedCCA_MultiMod:
                 sig_idx = -int(self.n_permu*self.p_value*n_components)
                 sig_level_fold.append(corr_trials[sig_idx])
         if self.message:
-            print('Average ISC_all of the top {} components on the training sets: {}'.format(n_components, np.average(corr_all_train, axis=0)))
-            print('Average ISC_all of the top {} components on the test sets: {}'.format(n_components, np.average(corr_all_test, axis=0)))
-            print('Average ISC_eeg of the top {} components on the training sets: {}'.format(n_components, np.average(corr_eeg_train, axis=0)))
-            print('Average ISC_eeg of the top {} components on the test sets: {}'.format(n_components, np.average(corr_eeg_test, axis=0)))
-            print('Significance level: ISC_EEG={}'.format(np.average(sig_level_fold)))
+            print('Average IMC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_all_train, axis=0)))
+            print('Average IMC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_all_test, axis=0)))
+            print('Average ISC of the top {} components on the training sets: {}'.format(n_components, np.average(corr_eeg_train, axis=0)))
+            print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_eeg_test, axis=0)))
+            print('Significance level: ISC={}'.format(np.average(sig_level_fold)))
         return corr_all_test, cov_all_test, corr_eeg_test, cov_eeg_test, sig_level_fold, forward_model_fold
 
 

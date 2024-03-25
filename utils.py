@@ -452,6 +452,10 @@ def sig_level_binomial_test(p_value, total_trials, p=0.5):
 
 
 def eval_mm(corr_match_fold, corr_mismatch_fold, nb_comp_into_account=2):
+    # Remove rows where any value is NaN (because the trial length is too long for some folds/subjects)
+    idx_not_nan = ~np.isnan(corr_match_fold).any(axis=1)
+    corr_match_fold = corr_match_fold[idx_not_nan,:]
+    corr_mismatch_fold = corr_mismatch_fold[idx_not_nan,:]
     corr_match_cv = np.mean(corr_match_fold, axis=0)
     corr_mismatch_cv = np.mean(corr_mismatch_fold, axis=0)
     print('Mean corr with match features across trials and folds: ', corr_match_cv[:nb_comp_into_account])
@@ -466,6 +470,10 @@ def eval_mm(corr_match_fold, corr_mismatch_fold, nb_comp_into_account=2):
 
 
 def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_account=2):
+    # Remove rows where any value is NaN (because the trial length is too long for some folds/subjects)
+    idx_not_nan = ~np.isnan(corr_att_fold).any(axis=1)
+    corr_att_fold = corr_att_fold[idx_not_nan,:]
+    corr_unatt_fold = corr_unatt_fold[idx_not_nan,:]
     nb_test = corr_att_fold.shape[0]
     corr_att_cv = np.mean(corr_att_fold, axis=0)
     corr_unatt_cv = np.mean(corr_unatt_fold, axis=0)
