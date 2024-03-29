@@ -59,11 +59,22 @@ def schmidt_orthogonalization(vectors):
     return orthogonal_vectors
 
 
+def expand_data_to_3D(data):
+    '''
+    Expand 1D or 2D data to 3D data
+    '''
+    if np.ndim(data) == 1:
+        data = np.expand_dims(np.expand_dims(data, axis=1), axis=2)
+    elif np.ndim(data) == 2:
+        data = np.expand_dims(data, axis=2)
+    return data
+
+
 def regress_out(X, Y):
     '''
     Regress out Y from X
-    X: T x Dx
-    Y: T x Dy
+    X: T x Dx or T x Dx x N
+    Y: T x Dy or T,
     '''
     if np.ndim(Y) == 1:
         Y = np.expand_dims(Y, axis=1)
@@ -78,6 +89,41 @@ def regress_out(X, Y):
     else:
         raise ValueError('Check the dimension of X')
     return X_res
+
+
+def further_regress_out(data_3D, confound_3D, L_d, L_c, offset_d, offset_c):
+    N = data_3D.shape[2]
+    data_clean_list = []
+    for n in range(N):
+        data = block_Hankel(data_3D[:,:,n], L_d, offset_d)
+        confound = block_Hankel(confound_3D[:,:,n], L_c, offset_c)
+        data_clean = regress_out(data, confound)
+        data_clean_list.append(data_clean)
+    data_clean_3D = np.stack(data_clean_list, axis=2)
+    return data_clean_3D
+
+
+def further_regress_out_list(X_list, confound_list, L_d, L_c, offset_d, offset_c):
+    X_list = [expand_data_to_3D(X) for X in X_list]
+    confound_list = [expand_data_to_3D(confound) for confound in confound_list]
+    N = max(X_list[0].shape[2], confound_list[0].shape[2])
+    X_list = [np.tile(X,(1,1,N)) if X.shape[2] == 1 else X for X in X_list]
+    confound_list = [np.tile(confound,(1,1,N)) if confound.shape[2] == 1 else confound for confound in confound_list]
+    len_list = [X.shape[0] for X in X_list]
+    X_reg = further_regress_out(np.concatenate(tuple(X_list), axis=0), np.concatenate(tuple(confound_list), axis=0), L_d, L_c, offset_d, offset_c)
+    X_reg_list = np.split(X_reg, np.cumsum(len_list)[:-1], axis=0)
+    return X_reg_list
+
+
+def stack_modal(modal_nested_list):
+    nb_video = len(modal_nested_list[0])
+    dim_list = [modal[0].shape[1] for modal in modal_nested_list]
+    stacked_list = []
+    for i in range(nb_video):
+        modal_list = [modal[i] for modal in modal_nested_list]
+        modal_stacked = np.concatenate(tuple(modal_list), axis=1)
+        stacked_list.append(modal_stacked)
+    return stacked_list, dim_list
 
 
 def get_cov_mtx(X, dim_list, regularization=None):
@@ -294,6 +340,7 @@ def get_val_set(nested_datalist, fold, fold_val, crs_val):
         rest_list = [np.concatenate(tuple(mod), axis=0) for mod in nested_restlist]
         val_list = [np.concatenate(tuple(mod), axis=0) for mod in nested_vallist]
     return nested_restlist, nested_vallist, rest_list, val_list
+
 
 def into_trials(data, fs, t=60, start_points=None):
     if np.ndim(data)==1:
@@ -679,7 +726,7 @@ def extract_highfreq(EEG, resamp_freqs, band=[15,20], ch_eog=None, regression=Fa
     return envelope
 
 
-def preprocessing(file_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=None, bads=[], eog=True, regression=True, normalize=True):
+def preprocessing(file_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=None, bads=[], eog=True, regression=False, normalize=False):
     '''
     Preprocessing of the raw signal
     Re-reference -> Highpass filter (-> downsample)
@@ -895,7 +942,7 @@ def get_gaze(gaze_path, len_seg, offset=None):
 
 
 def get_eeg_eog(eeg_path, fsStim, bads, expdim=True):
-    eeg_prepro, fs, _ = preprocessing(eeg_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=fsStim, bads=bads, eog=True, regression=True, normalize=True)
+    eeg_prepro, fs, _ = preprocessing(eeg_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=fsStim, bads=bads, eog=True, regression=False, normalize=False)
     eeg_channel_indices = mne.pick_types(eeg_prepro.info, eeg=True)
     eog_channel_indices = mne.pick_types(eeg_prepro.info, eog=True)
     eeg_downsampled, _ = eeg_prepro[eeg_channel_indices]
