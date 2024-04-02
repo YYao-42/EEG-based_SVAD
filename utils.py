@@ -459,8 +459,8 @@ def split_multi_mod_LVO(nested_datalist, leave_out=2):
     for i in range(0, nb_videos, leave_out):
         indices_train = [j for j in range(nb_videos) if j not in range(i, i+leave_out)]
         indices_test = [j for j in range(i, i+leave_out)]
-        train_list_folds.append([np.concatenate(tuple([mod[i] for i in indices_train]), axis=0) for mod in nested_datalist])
-        test_list_folds.append([np.concatenate(tuple([mod[i] for i in indices_test]), axis=0) for mod in nested_datalist])
+        train_list_folds.append([np.concatenate(tuple([mod[i] for i in indices_train]), axis=0) if mod is not None else None for mod in nested_datalist])
+        test_list_folds.append([np.concatenate(tuple([mod[i] for i in indices_test]), axis=0) if mod is not None else None for mod in nested_datalist])
     return train_list_folds, test_list_folds
 
 

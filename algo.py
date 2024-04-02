@@ -525,7 +525,7 @@ class CanonicalCorrelationAnalysis:
         corr_mismatch_eeg = np.concatenate(tuple(corr_mismatch_eeg), axis=0)
         return corr_match_eeg, corr_mismatch_eeg
 
-    def att_or_unatt_LVO(self, feat_unatt_list, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None):
+    def att_or_unatt_LVO(self, feat_unatt_list, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, EEG_ori_list=None):
         # train on attended data and try to decode the attended object
         # train on unattended data and try to decode the unattended object
         # attended and unattended data are both shown on the screen
@@ -533,7 +533,7 @@ class CanonicalCorrelationAnalysis:
         nb_videos = len(feat_att_list)
         nb_folds = nb_videos//self.leave_out
         assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
-        nested_datalist = [self.EEG_list, feat_att_list, feat_unatt_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, feat_att_list, feat_unatt_list]
+        nested_datalist = [self.EEG_list, feat_att_list, feat_unatt_list, self.mask_list, EEG_ori_list]
         train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
         assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
         corr_att_fold = []
@@ -542,10 +542,7 @@ class CanonicalCorrelationAnalysis:
         forward_model_fold = []
         
         for idx in range(0, nb_folds):
-            if self.mask_list is not None:
-                [EEG_train, Att_train, Unatt_train, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
-            else:
-                [EEG_train,  Att_train, Unatt_train], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
+            [EEG_train, Att_train, Unatt_train, self.mask_train, _], [EEG_test, Att_test, Unatt_test, self.mask_test, EEG_ori_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is None:
                 if TRAIN_WITH_ATT:
                     _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
@@ -558,8 +555,12 @@ class CanonicalCorrelationAnalysis:
             corr_unatt, _, _, _ = self.cal_corr_coe(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
             corr_att = np.expand_dims(corr_att, axis=0)
             corr_unatt = np.expand_dims(corr_unatt, axis=0)
-            forward_model = self.forward_model(EEG_test, V_eeg_train)
-            
+            if EEG_ori_test is not None:
+                EEG_trans, _ = self.get_transformed_data(EEG_test, Att_test, V_eeg_train, V_feat_train)
+                forward_model = self.forward_model(EEG_ori_test, V_eeg_train, X_trans=EEG_trans)
+            else:
+                forward_model = self.forward_model(EEG_test, V_eeg_train)
+
             corr_trials_att = self.permutation_test(EEG_test, Att_test, V_A=V_eeg_train, V_B=V_feat_train, block_len=1)
             sig_corr_att = self.calculate_sig_corr(corr_trials_att)
             sig_corr_fold.append(sig_corr_att) # Checked: sig_corr_unatt is close to sig_corr_att
