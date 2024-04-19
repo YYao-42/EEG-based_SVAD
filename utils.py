@@ -109,9 +109,12 @@ def further_regress_out_list(X_list, confound_list, L_d, L_c, offset_d, offset_c
     N = max(X_list[0].shape[2], confound_list[0].shape[2])
     X_list = [np.tile(X,(1,1,N)) if X.shape[2] == 1 else X for X in X_list]
     confound_list = [np.tile(confound,(1,1,N)) if confound.shape[2] == 1 else confound for confound in confound_list]
-    len_list = [X.shape[0] for X in X_list]
-    X_reg = further_regress_out(np.concatenate(tuple(X_list), axis=0), np.concatenate(tuple(confound_list), axis=0), L_d, L_c, offset_d, offset_c)
-    X_reg_list = np.split(X_reg, np.cumsum(len_list)[:-1], axis=0)
+    # Do regression on the entire concatenated data
+    # len_list = [X.shape[0] for X in X_list]
+    # X_reg = further_regress_out(np.concatenate(tuple(X_list), axis=0), np.concatenate(tuple(confound_list), axis=0), L_d, L_c, offset_d, offset_c)
+    # X_reg_list = np.split(X_reg, np.cumsum(len_list)[:-1], axis=0)
+    # Do regression per video
+    X_reg_list = [further_regress_out(X, confound, L_d, L_c, offset_d, offset_c) for X, confound in zip(X_list, confound_list)]
     return X_reg_list
 
 
@@ -618,6 +621,34 @@ def forward_model(X, W_Hankel, L=1, offset=0):
     return F
 
 
+def phase_scramble_2D(data):
+    # Initialize an array to hold the scrambled data
+    scrambled_data = np.zeros_like(data, dtype=np.complex)
+    # Loop over channels
+    for i in range(data.shape[1]):  # Assuming data.shape = (time, channel)
+        # Perform FFT on each channel independently
+        fft_result = np.fft.fft(data[:, i])
+        amplitude = np.abs(fft_result)
+        T = len(data[:, i])
+        # Generate random phase shifts for half of the spectrum
+        half_T = T // 2 if T % 2 == 0 else (T + 1) // 2
+        random_phase_half = np.exp(1j * np.random.uniform(0, 2*np.pi, size=half_T))
+        # Ensure conjugate symmetry
+        random_phase_full = np.concatenate(([1], random_phase_half[1:half_T], [1], np.conj(random_phase_half[1:half_T][::-1]))) if T%2==0 else np.concatenate(([1], random_phase_half[1:half_T], np.conj(random_phase_half[1:half_T][::-1])))
+        # Apply the random phase shifts
+        scrambled_fft = amplitude * random_phase_full
+        scrambled_data[:, i] = np.fft.ifft(scrambled_fft)
+    return scrambled_data.real
+
+
+def phase_scramble_3D(data):
+    _, _, N = data.shape
+    scrambled_data = np.zeros_like(data)
+    for n in range(N):
+        scrambled_data[:,:,n] = phase_scramble_2D(data[:,:,n])
+    return scrambled_data
+
+
 def shuffle_block(X, block_len):
     '''
     Shuffle the blocks of X along the time axis for each subject.
@@ -851,6 +882,8 @@ def plot_spatial_resp(forward_model, corr, file_name, fig_size=(10, 4), ifISC=Fa
             im, _ = mne.viz.plot_topomap(np.abs(forward_model[:,comp]), create_info, ch_type='eeg', axes=ax, show=False, vlim=(vmin, vmax))
             if idx_sig is not None:
                 color = 'b' if comp in idx_sig else 'black'
+            else:
+                color = 'black'
             if ifISC:
                 ax.set_title("CC: {order}\n ISC: {corr:.3f}".format(order=comp+1, corr=np.mean(corr[:,comp])), color=color)
             else:
@@ -871,7 +904,7 @@ def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, s
         corr_att_fold = np.mean(corr_att_fold, axis=0, keepdims=1)
         if corr_unatt_fold is not None:
             corr_unatt_fold = np.mean(corr_unatt_fold, axis=0, keepdims=1)
-        sig_corr_fold = [np.mean(sig_corr_fold)]
+        sig_corr_fold = [np.mean(sig_corr_fold)] if sig_corr_fold is not None else None
         forward_model_fold = [np.abs(fm) for fm in forward_model_fold]
         forward_model_fold = [np.mean(forward_model_fold, axis=0)]
         file_name = file_name.replace('Folds', 'Avg')
@@ -897,7 +930,7 @@ def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, s
                 ax.set_title("{pref}: {corr:.3f}".format(pref=Prefix, corr=corr_att_fold[i,j]), color='black') 
             ax.set_xticks([])
             ax.set_yticks([])
-            if j == 0:  # add row title to the first subplot in each row
+            if j == 0 and sig_corr_fold is not None:  # add row title to the first subplot in each row
                 ax.set_ylabel("Sig: {sig:.3f}".format(sig=sig_corr_fold[i]), fontsize=12)
     cbar_ax = fig.add_axes([0.85, 0.3, 0.02, 0.5])
     fig.colorbar(im, cax=cbar_ax, label='Weight')
@@ -942,7 +975,7 @@ def get_gaze(gaze_path, len_seg, offset=None):
 
 
 def get_eeg_eog(eeg_path, fsStim, bads, expdim=True):
-    eeg_prepro, fs, _ = preprocessing(eeg_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=fsStim, bads=bads, eog=True, regression=False, normalize=False)
+    eeg_prepro, fs, _ = preprocessing(eeg_path, HP_cutoff = 0.5, AC_freqs=50, band=None, resamp_freqs=fsStim, bads=bads, eog=True, regression=False, normalize=True)
     eeg_channel_indices = mne.pick_types(eeg_prepro.info, eeg=True)
     eog_channel_indices = mne.pick_types(eeg_prepro.info, eog=True)
     eeg_downsampled, _ = eeg_prepro[eeg_channel_indices]
@@ -1056,6 +1089,7 @@ def remove_shot_cuts(data, fs, time_points=None, remove_time=1):
         nearby_idx = nearby_idx + list(range(max(0, p-len_points), min(p+len_points, T)))
     nearby_idx = list(set(nearby_idx))
     data_clean = np.delete(data, nearby_idx, axis=0)
+    data_clean = data_clean - np.mean(data_clean, axis=0)
     return data_clean
 
 
@@ -1081,9 +1115,11 @@ def load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj, LO
 
 
 # Check the alignment between eog and gaze. The synchronization is good if the peaks of two signals (eye blinks) are aligned.
-def check_alignment(subj_ID, eog_multisubj_list, gaze_multisubj_list, nb_points=500):
+def check_alignment(subj_ID, eog_multisubj_list, gaze_multisubj_list, blink_multisubj_list=None, nb_points=500):
     eog_one_subj_list = [eog[:,:,subj_ID] for eog in eog_multisubj_list]
     gaze_one_subj_list = [gaze[:,:,subj_ID] for gaze in gaze_multisubj_list]
+    if blink_multisubj_list is not None:
+        blink_one_subj_list = [blink[:,:,subj_ID] for blink in blink_multisubj_list] 
     eog_verti_list = [eog[:,0] - eog[:,1] for eog in eog_one_subj_list]
     gaze_y_list = [gaze[:,1] for gaze in gaze_one_subj_list]
     nb_videos = len(eog_verti_list)
@@ -1095,6 +1131,8 @@ def check_alignment(subj_ID, eog_multisubj_list, gaze_multisubj_list, nb_points=
     for i in range(nb_videos):
         ax[i//nb_cols, i%nb_cols].plot(eog_verti_list[i][-nb_points:]/np.max(eog_verti_list[i][-nb_points:]), label='eog vertical')
         ax[i//nb_cols, i%nb_cols].plot(gaze_y_list[i][-nb_points:]/np.max(gaze_y_list[i][-nb_points:]), label='gaze y')
+        if blink_multisubj_list is not None:
+            ax[i//nb_cols, i%nb_cols].plot(blink_one_subj_list[i][-nb_points:], label='blink') 
         ax[i//nb_cols, i%nb_cols].set_title('Video ' + str(i+1))
         ax[i//nb_cols, i%nb_cols].legend()
     plt.savefig('figures/Overlay/alignment_' + str(subj_ID) + '.png')
@@ -1156,14 +1194,18 @@ def remove_saccade(datalist, Sacc, remove_before=15, remove_after=30):
     return datalist
 
 
-def interpolate_blinks(time_series, blinks):
+def interpolate_blinks(ts, blinks):
     '''
     Interpolate the time series around the blinks indicated by the binary mask
     '''
+    time_series = copy.deepcopy(ts)
+    # If the time series is 3D, replicate the blinks along the second dimension
+    if time_series.shape[1] != blinks.shape[0]:
+        blinks = np.tile(blinks, (1, time_series.shape[1], 1))
     # Transform the blinks into a binary mask
     blinks = blinks > 0.5
     # Set the indices of the blinks to NaN
-    time_series[blinks, ...] = np.nan
+    time_series[blinks] = np.nan
     if np.ndim(time_series) == 2:
         time_series = clean_features(time_series, smooth=False)
     else:
