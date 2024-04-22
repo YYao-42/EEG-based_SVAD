@@ -494,6 +494,16 @@ def split_mm_balance(nested_datalist, fold=10, fold_idx=1):
     return train_list, test_list, nested_train, nested_test
 
 
+def split_mm_balance_folds(nested_datalist, fold=10):
+    train_list_folds = []
+    test_list_folds = []
+    for fold_idx in range(1, fold+1):
+        train_list, test_list, _, _ = split_mm_balance(nested_datalist, fold, fold_idx)
+        train_list_folds.append(train_list)
+        test_list_folds.append(test_list)
+        yield train_list_folds, test_list_folds
+
+
 def sig_level_binomial_test(p_value, total_trials, p=0.5):
     critical_value = binom.ppf(1-p_value, total_trials, p=p)
     critical_value = critical_value+1 if (1 - binom.cdf(critical_value, total_trials, p=p) > p_value) else critical_value # in case ppf returns a value that leads to a closer but larger p-value
