@@ -636,6 +636,164 @@ class CanonicalCorrelationAnalysis:
         return corr_att_eeg, corr_unatt_eeg
 
 
+class DiscriminativeCCA:
+    def __init__(self, signal_list, compete_list, target_list, fs, para_signal, para_compete, para_target, fold=None, leave_out=2, n_components=5, regularization='lwcov', message=True, signifi_level=True, n_permu=500, p_value=0.05):
+        '''
+        signal_list: list of signals to be maximally correlated with target signals, each element is a T(#sample)xDs(#channel) array
+        compete_list: list of compete signals to be minimally correlated with target signals, each element is a T(#sample)xDc(#channel) array
+        target_list: list of target signals, each element is a T(#sample)xDt(#channel) array
+        fs: Sampling rate
+        para_signal/para_compete/para_target: Parameters for spatial-temporal filter
+        n_components: number of components to be returned
+        regularization: regularization of the estimated covariance matrix
+        message: If print message
+        signifi_level: If calculate significance level
+        n_permu: Number of permutations for significance level calculation in each fold
+        p_value: P-value for significance level calculation
+        '''
+        self.signal_list = signal_list
+        self.compete_list = compete_list
+        self.target_list = target_list
+        self.fs = fs
+        self.para_signal = para_signal
+        self.para_compete = para_compete
+        self.para_target = para_target
+        self.fold = fold
+        self.leave_out = leave_out
+        assert (leave_out is not None) ^ (fold is not None), "Only one of leave_out and fold should be not None"
+        self.train_list_folds, self.test_list_folds = utils.split_mm_balance_folds([signal_list, compete_list, target_list], self.fold) if self.fold is not None else utils.split_multi_mod_LVO([signal_list, compete_list, target_list], self.leave_out)
+        self.n_components = n_components
+        self.regularization = regularization
+        self.message = message
+        self.signifi_level = signifi_level
+        self.n_permu = n_permu
+        self.p_value = p_value
+        self.mask_train = None
+        self.mask_test = None
+
+    def fit(self, Xs, Xc, Xy):
+        T = Xs.shape[0]
+        mtx_Xs = utils.block_Hankel(Xs, self.para_signal[0], self.para_signal[1])
+        mtx_Xc = utils.block_Hankel(Xc, self.para_compete[0], self.para_compete[1])
+        mtx_Xd = mtx_Xs - mtx_Xc
+        mtx_Xy = utils.block_Hankel(Xy, self.para_target[0], self.para_target[1])
+        X = np.concatenate((mtx_Xd, mtx_Xy), axis=1)
+        [Dd_H, Dy_H] = [mtx_Xd.shape[1], mtx_Xy.shape[1]]
+        Rxx, _ = utils.get_cov_mtx(X, [Dd_H, Dy_H], self.regularization)
+        Rss, _ = utils.get_cov_mtx(mtx_Xs, [Dd_H], self.regularization)
+        Rcc, _ = utils.get_cov_mtx(mtx_Xc, [Dd_H], self.regularization)
+        Dxx = np.zeros_like(Rxx)
+        Dxx[:Dd_H,:Dd_H] = Rss - Rcc
+        Dxx[Dd_H:,Dd_H:] = Rxx[Dd_H:,Dd_H:]
+        # find the top-K eigenvalues
+        lam, W = utils.geig_sorted(Rxx, Dxx, self.n_components, option='descending')
+        scale_mtx = sqrtm(np.diag(lam)@LA.inv(W.T@Dxx@W*T))
+        W = W @ scale_mtx
+        Ws = W[:Dd_H,:]
+        Wy = W[Dd_H:,:]
+        Xs_trans, Xc_trans, Xy_trans = self.get_transformed_data(Xs, Xc, Xy, Ws, Ws, Wy)
+        S = (Xs_trans + Xy_trans - Xc_trans) @ np.diag(1/lam)
+        return Ws, Wy, S
+
+    def fit_hetero(self, Xs, Xc, Xy):
+        T = Xs.shape[0]
+        mtx_Xs = utils.block_Hankel(Xs, self.para_signal[0], self.para_signal[1])
+        mtx_Xc = utils.block_Hankel(Xc, self.para_compete[0], self.para_compete[1])
+        mtx_Xy = utils.block_Hankel(Xy, self.para_target[0], self.para_target[1])
+        X = np.concatenate((mtx_Xs, mtx_Xy, mtx_Xc), axis=1)
+        [Ds_H, Dy_H, Dc_H] = [mtx_Xs.shape[1], mtx_Xy.shape[1], mtx_Xc.shape[1]]
+        X_eqv = np.concatenate((mtx_Xs, mtx_Xy, mtx_Xc*(-1)), axis=1)
+        Rxx, Dxx = utils.get_cov_mtx(X_eqv, [Ds_H, Dc_H, Dy_H], self.regularization)
+        Dxx[Ds_H+Dy_H:,Ds_H+Dy_H:] = -1*Dxx[Ds_H+Dy_H:,Ds_H+Dy_H:]
+        # find the top-K eigenvalues
+        lam, W = utils.geig_sorted(Rxx, Dxx, self.n_components, option='descending')
+        scale_mtx = sqrtm(np.diag(lam)@LA.inv(W.T@Dxx@W*T))
+        W = W @ scale_mtx
+        Ws = W[:Ds_H,:]
+        Wy = W[Ds_H:Ds_H+Dy_H,:]
+        Wc = W[Ds_H+Dy_H:,:]
+        Xs_trans, Xc_trans, Xy_trans = self.get_transformed_data(Xs, Xc, Xy, Ws, Wc, Wy)
+        S = (Xs_trans + Xy_trans - Xc_trans) @ np.diag(1/lam)
+        return Ws, Wc, Wy, S
+
+    def get_transformed_data(self, Xs, Xc, Xy, Ws, Wc, Wy):
+        '''
+        Get the transformed data
+        '''
+        mtx_Xs = utils.block_Hankel(Xs, self.para_signal[0], self.para_signal[1])
+        mtx_Xc = utils.block_Hankel(Xc, self.para_compete[0], self.para_compete[1])
+        mtx_Xy = utils.block_Hankel(Xy, self.para_target[0], self.para_target[1])
+        mtx_Xs_centered = mtx_Xs - np.mean(mtx_Xs, axis=0, keepdims=True)
+        mtx_Xc_centered = mtx_Xc - np.mean(mtx_Xc, axis=0, keepdims=True)
+        mtx_Xy_centered = mtx_Xy - np.mean(mtx_Xy, axis=0, keepdims=True)
+        Xs_trans = mtx_Xs_centered @ Ws
+        Xc_trans = mtx_Xc_centered @ Wc
+        Xy_trans = mtx_Xy_centered @ Wy
+        return Xs_trans, Xc_trans, Xy_trans
+
+    def get_corr_coe(self, X_trans, Y_trans):
+        corr_pvalue = [pearsonr(X_trans[:,k], Y_trans[:,k]) for k in range(self.n_components)]
+        corr_coe = np.array([corr_pvalue[k][0] for k in range(self.n_components)])
+        p_value = np.array([corr_pvalue[k][1] for k in range(self.n_components)])
+        return corr_coe, p_value
+
+    def cross_val(self):
+        nb_folds = len(self.train_list_folds)
+        corr_sy_train_fold = np.zeros((nb_folds, self.n_components))
+        corr_cy_train_fold = np.zeros((nb_folds, self.n_components))
+        corr_sy_test_fold = np.zeros((nb_folds, self.n_components))
+        corr_cy_test_fold = np.zeros((nb_folds, self.n_components))
+        for idx in range(nb_folds):
+            [signal_train, compete_train, target_train], [signal_test, compete_test, target_test] = self.train_list_folds[idx], self.test_list_folds[idx]
+            Ws, Wy, _ = self.fit(signal_train, compete_train, target_train)
+            Wc = Ws
+            # Ws, Wc, Wy, _ = self.fit_hetero(signal_train, compete_train, target_train)
+            Xs_trans_train, Xc_trans_train, Xy_trans_train = self.get_transformed_data(signal_train, compete_train, target_train, Ws, Wc, Wy)
+            corr_sy_train_fold[idx,:], _ = self.get_corr_coe(Xs_trans_train, Xy_trans_train)
+            corr_cy_train_fold[idx,:], _ = self.get_corr_coe(Xc_trans_train, Xy_trans_train)
+            # Use Ws for both Xs and Xc because we don't know which one is the attended signal in the test set
+            Xs_trans_test, Xc_trans_test, Xy_trans_test = self.get_transformed_data(signal_test, compete_test, target_test, Ws, Ws, Wy) 
+            corr_sy_test_fold[idx,:], _ = self.get_corr_coe(Xs_trans_test, Xy_trans_test)
+            corr_cy_test_fold[idx,:], _ = self.get_corr_coe(Xc_trans_test, Xy_trans_test)
+        if self.message:
+            print('Average correlation coefficients of the top {} components on the training sets (signal): {}'.format(self.n_components, np.average(corr_sy_train_fold, axis=0)))
+            print('Average correlation coefficients of the top {} components on the training sets (compete): {}'.format(self.n_components, np.average(corr_cy_train_fold, axis=0)))
+            print('Average correlation coefficients of the top {} components on the test sets (signal): {}'.format(self.n_components, np.average(corr_sy_test_fold, axis=0)))
+            print('Average correlation coefficients of the top {} components on the test sets (compete): {}'.format(self.n_components, np.average(corr_cy_test_fold, axis=0)))
+        return corr_sy_train_fold, corr_cy_train_fold, corr_sy_test_fold, corr_cy_test_fold
+
+    def att_or_unatt_trials(self, trial_len, BOOTSTRAP=True):
+        nb_folds = len(self.train_list_folds)
+        corr_signal = []
+        corr_compete = []
+        for idx in range(nb_folds):
+            [signal_train, compete_train, target_train], [signal_test, compete_test, target_test] = self.train_list_folds[idx], self.test_list_folds[idx]
+            Ws, Wy, _ = self.fit(signal_train, compete_train, target_train)
+            # Ws, Wc, Wy, _ = self.fit_hetero(signal_train, compete_train, target_train)
+            Xs_trans, Xc_trans, Xy_trans = self.get_transformed_data(signal_test, compete_test, target_test, Ws, Wc, Wy)
+            if Xs_trans.shape[0]-trial_len*self.fs >= 0:
+                if BOOTSTRAP:
+                    nb_trials = Xs_trans.shape[0]//self.fs * 2
+                    start_points = np.random.randint(0, Xs_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+                else:
+                    start_points = None
+                Xy_trans_trials = utils.into_trials(Xy_trans, self.fs, trial_len, start_points=start_points)
+                Xs_trans_trials = utils.into_trials(Xs_trans, self.fs, trial_len, start_points=start_points)
+                Xc_trans_trials = utils.into_trials(Xc_trans, self.fs, trial_len, start_points=start_points)
+                corr_signal_i = np.stack([self.get_corr_coe(Xy, Xs)[0] for Xy, Xs in zip(Xy_trans_trials, Xs_trans_trials)])
+                corr_compete_i = np.stack([self.get_corr_coe(Xy, Xc)[0] for Xy, Xc in zip(Xy_trans_trials, Xc_trans_trials)])
+                corr_signal.append(corr_signal_i)
+                corr_compete.append(corr_compete_i)
+            else:
+                print('The length of the video is too short for the given trial length.')
+                # return NaN values
+                corr_signal.append(np.full((1, self.n_components), np.nan))
+                corr_compete.append(np.full((1, self.n_components), np.nan))
+        corr_signal = np.concatenate(tuple(corr_signal), axis=0)
+        corr_compete = np.concatenate(tuple(corr_compete), axis=0)
+        return corr_signal, corr_compete
+    
+
 class GeneralizedCCA:
     def __init__(self, EEG_list, fs, L, offset, hankelized=False, dim_list=None, fold=10, leave_out=2, n_components=5, regularization='lwcov', message=True, signifi_level=True, n_permu=500, p_value=0.05, dim_subspace=4, save_W_perfold=False, crs_val=True):
         '''

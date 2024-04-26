@@ -36,6 +36,27 @@ def eig_sorted(X, option='descending'):
     return lam, V
 
 
+def geig_sorted(A, B, n_comp, option='descending'):
+    '''
+    Solve the generalized eigenvalue problem A V = B V diag(lam)
+    Assume that A and B are real symmetric matrices
+    Return the first n_comp eigenvalues and eigenvectors
+    '''
+    lam, V = eig(A, B) 
+    lam = np.real(lam)
+    V = np.real(V)
+    if option == 'descending':
+        idx = np.argsort(-lam)
+    elif option =='ascending':
+        idx = np.argsort(lam)
+    else:
+        idx = range(len(lam))
+        print('Warning: Not sorted')
+    lam = lam[idx] # rank eigenvalues
+    V = V[:, idx] # rearrange eigenvectors accordingly
+    return lam[:n_comp], V[:,:n_comp]
+
+
 def PCAreg_inv(X, rank):
     '''
     PCA Regularized inverse of a symmetric square matrix X
@@ -501,7 +522,7 @@ def split_mm_balance_folds(nested_datalist, fold=10):
         train_list, test_list, _, _ = split_mm_balance(nested_datalist, fold, fold_idx)
         train_list_folds.append(train_list)
         test_list_folds.append(test_list)
-        yield train_list_folds, test_list_folds
+    return train_list_folds, test_list_folds
 
 
 def sig_level_binomial_test(p_value, total_trials, p=0.5):
