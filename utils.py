@@ -539,9 +539,11 @@ def eval_mm(corr_match_fold, corr_mismatch_fold, nb_comp_into_account=2):
     corr_mismatch_fold = corr_mismatch_fold[idx_not_nan,:]
     corr_match_cv = np.mean(corr_match_fold, axis=0)
     corr_mismatch_cv = np.mean(corr_mismatch_fold, axis=0)
-    print('Mean corr with match features across trials and folds: ', corr_match_cv[:nb_comp_into_account])
-    print('Mean corr with mismatch features across trials and folds: ', corr_mismatch_cv[:nb_comp_into_account])
-    nb_correct = sum(corr_match_fold[:,:nb_comp_into_account].max(axis=1)>corr_mismatch_fold[:,:nb_comp_into_account].max(axis=1))
+    print('Mean corr with match features across trials and folds: ', corr_match_cv)
+    print('Mean corr with mismatch features across trials and folds: ', corr_mismatch_cv)
+    corr_match_fold = np.array([np.sort(row)[::-1] for row in corr_match_fold])
+    corr_mismatch_fold = np.array([np.sort(row)[::-1] for row in corr_mismatch_fold])
+    nb_correct = sum(corr_match_fold[:,:nb_comp_into_account].sum(axis=1)>corr_mismatch_fold[:,:nb_comp_into_account].sum(axis=1))
     nb_test = corr_match_fold.shape[0]
     acc = nb_correct/nb_test
     p_value = binomtest(nb_correct, nb_test, alternative='greater').pvalue
@@ -558,9 +560,11 @@ def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_ac
     nb_test = corr_att_fold.shape[0]
     corr_att_cv = np.mean(corr_att_fold, axis=0)
     corr_unatt_cv = np.mean(corr_unatt_fold, axis=0)
-    print('Mean corr with attended features across trials and folds: ', corr_att_cv[:nb_comp_into_account])
-    print('Mean corr with unattended features across trials and folds: ', corr_unatt_cv[:nb_comp_into_account])
-    nb_correct = sum(corr_att_fold[:,:nb_comp_into_account].max(axis=1)>corr_unatt_fold[:,:nb_comp_into_account].max(axis=1))
+    print('Mean corr with attended features across trials and folds: ', corr_att_cv)
+    print('Mean corr with unattended features across trials and folds: ', corr_unatt_cv)
+    corr_att_fold = np.array([np.sort(row)[::-1] for row in corr_att_fold])
+    corr_unatt_fold = np.array([np.sort(row)[::-1] for row in corr_unatt_fold])
+    nb_correct = sum(corr_att_fold[:,:nb_comp_into_account].sum(axis=1)>corr_unatt_fold[:,:nb_comp_into_account].sum(axis=1))
     if not TRAIN_WITH_ATT:
         nb_correct = nb_test - nb_correct
     acc = nb_correct/nb_test

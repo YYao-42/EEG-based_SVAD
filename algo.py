@@ -231,6 +231,27 @@ class CanonicalCorrelationAnalysis:
         ChDist = np.sqrt(self.dim_subspace-TSC)
         return corr_coe, TSC, ChDist, p_value
 
+    def get_corr_att_unatt_trials(self, X, Y_att, Y_unatt, V_X, V_Y, BOOTSTRAP, trial_len):
+        X_trans, Y_att_trans = self.get_transformed_data(X, Y_att, V_X, V_Y)
+        _, Y_unatt_trans = self.get_transformed_data(X, Y_unatt, V_X, V_Y)
+        if X_trans.shape[0]-trial_len*self.fs >= 0:
+            if BOOTSTRAP:
+                nb_trials = min(X_trans.shape[0]//self.fs * 2, 1000)
+                start_points = np.random.randint(0, X_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+            else:
+                start_points = None
+            X_trials = utils.into_trials(X_trans, self.fs, trial_len, start_points=start_points)
+            Y_att_trials = utils.into_trials(Y_att_trans, self.fs, trial_len, start_points=start_points)
+            Y_unatt_trials = utils.into_trials(Y_unatt_trans, self.fs, trial_len, start_points=start_points)
+            corr_att_trials = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(X_trials, Y_att_trials)])
+            corr_unatt_trials = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(X_trials, Y_unatt_trials)])
+        else:
+            print('The length of the video is too short for the given trial length.')
+            # return NaN values
+            corr_att_trials = np.full((1, self.n_components), np.nan)
+            corr_att_trials = np.full((1, self.n_components), np.nan)
+        return corr_att_trials, corr_unatt_trials
+
     def cal_corr_coe(self, X, Y, V_A, V_B):
         X_trans, Y_trans = self.get_transformed_data(X, Y, V_A, V_B)
         corr_coe, TSC, ChDist, p_value = self.get_corr_coe(X_trans, Y_trans)
@@ -526,7 +547,7 @@ class CanonicalCorrelationAnalysis:
         corr_mismatch_eeg = np.concatenate(tuple(corr_mismatch_eeg), axis=0)
         return corr_match_eeg, corr_mismatch_eeg
 
-    def att_or_unatt_LVO(self, feat_unatt_list, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, EEG_ori_list=None):
+    def att_or_unatt_LVO(self, feat_unatt_list, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, EEG_ori_list=None, COMBINE_ATT_UNATT=False):
         # train on attended data and try to decode the attended object
         # train on unattended data and try to decode the unattended object
         # attended and unattended data are both shown on the screen
@@ -546,7 +567,14 @@ class CanonicalCorrelationAnalysis:
             [EEG_train, Att_train, Unatt_train, self.mask_train, _], [EEG_test, Att_test, Unatt_test, self.mask_test, EEG_ori_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is None:
                 if TRAIN_WITH_ATT:
-                    _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
+                    if COMBINE_ATT_UNATT:
+                        Att_train = np.expand_dims(Att_train, axis=1) if len(Att_train.shape) == 1 else Att_train
+                        Unatt_train = np.expand_dims(Unatt_train, axis=1) if len(Unatt_train.shape) == 1 else Unatt_train
+                        feat_cb = np.concatenate((Att_train, Unatt_train), axis=1)
+                        _, _, _, _, V_eeg_train, V_feat_cb, _ = self.fit(EEG_train, feat_cb)
+                        V_feat_train = V_feat_cb[:V_feat_cb.shape[0]//2,:]
+                    else:
+                        _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
                 else:
                     _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Unatt_train)
             else:
@@ -592,7 +620,7 @@ class CanonicalCorrelationAnalysis:
                 print(np.average(corr, axis=0))
         return corr_att_fold, corr_unatt_fold, sig_corr_fold, sig_corr_pool, forward_model_fold
 
-    def att_or_unatt_LVO_trials(self, feat_unatt_list, trial_len, BOOTSTRAP=True, V_eeg=None, V_Stim=None):
+    def att_or_unatt_LVO_trials(self, feat_unatt_list, trial_len, BOOTSTRAP=True, V_eeg=None, V_Stim=None, COMBINE_ATT_UNATT=False):
         feat_att_list = self.Stim_list
         nb_videos = len(feat_att_list)
         nb_folds = nb_videos//self.leave_out
@@ -604,11 +632,18 @@ class CanonicalCorrelationAnalysis:
         corr_unatt_eeg = []
         for idx in range(0, nb_folds):
             if self.mask_list is not None:
-                [EEG_train, Att_train, _, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+                [EEG_train, Att_train, Unatt_train, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
             else:
-                [EEG_train,  Att_train, _], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
+                [EEG_train,  Att_train, Unatt_train], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
             if V_eeg is None:
-                _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
+                    if COMBINE_ATT_UNATT:
+                        Att_train = np.expand_dims(Att_train, axis=1) if len(Att_train.shape) == 1 else Att_train
+                        Unatt_train = np.expand_dims(Unatt_train, axis=1) if len(Unatt_train.shape) == 1 else Unatt_train
+                        feat_cb = np.concatenate((Att_train, Unatt_train), axis=1)
+                        _, _, _, _, V_eeg_train, V_feat_cb, _ = self.fit(EEG_train, feat_cb)
+                        V_feat_train = V_feat_cb[:V_feat_cb.shape[0]//2,:]
+                    else:
+                        _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
             else:
                  V_eeg_train, V_feat_train = V_eeg, V_Stim
             EEG_trans, Att_trans = self.get_transformed_data(EEG_test, Att_test, V_eeg_train, V_feat_train)
@@ -634,6 +669,44 @@ class CanonicalCorrelationAnalysis:
         corr_att_eeg = np.concatenate(tuple(corr_att_eeg), axis=0)
         corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
         return corr_att_eeg, corr_unatt_eeg
+
+    def att_or_unatt_classifer(self, feat_unatt_list, trial_len, BOOTSTRAP=True, V_eeg=None, V_Stim=None, COMBINE_ATT_UNATT=False):
+        feat_att_list = self.Stim_list
+        nb_videos = len(feat_att_list)
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list, feat_att_list, feat_unatt_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, feat_att_list, feat_unatt_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
+        corr_att_eeg_train = []
+        corr_unatt_eeg_train = []
+        corr_att_eeg_test = []
+        corr_unatt_eeg_test = []
+        for idx in range(0, nb_folds):
+            if self.mask_list is not None:
+                [EEG_train, Att_train, Unatt_train, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            else:
+                [EEG_train,  Att_train, Unatt_train], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
+            if V_eeg is None:
+                    if COMBINE_ATT_UNATT:
+                        Att_train = np.expand_dims(Att_train, axis=1) if len(Att_train.shape) == 1 else Att_train
+                        Unatt_train = np.expand_dims(Unatt_train, axis=1) if len(Unatt_train.shape) == 1 else Unatt_train
+                        feat_cb = np.concatenate((Att_train, Unatt_train), axis=1)
+                        _, _, _, _, V_eeg_train, V_feat_cb, _ = self.fit(EEG_train, feat_cb)
+                        V_feat_train = V_feat_cb[:V_feat_cb.shape[0]//2,:]
+                    else:
+                        _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
+            else:
+                 V_eeg_train, V_feat_train = V_eeg, V_Stim
+            # Generate correlation coefficients of attended and unattended trials in the training set; always use bootstrap
+            corr_att_trials_train, corr_unatt_trials_train = self.get_corr_att_unatt_trials(EEG_train, Att_train, Unatt_train, V_eeg_train, V_feat_train, BOOTSTRAP=True, trial_len=trial_len)
+            corr_att_eeg_train.append(corr_att_trials_train)
+            corr_unatt_eeg_train.append(corr_unatt_trials_train)
+            # Generate correlation coefficients of attended and unattended trials in the test set
+            corr_att_trials_test, corr_unatt_trials_test = self.get_corr_att_unatt_trials(EEG_test, Att_test, Unatt_test, V_eeg_train, V_feat_train, BOOTSTRAP=BOOTSTRAP, trial_len=trial_len)
+            corr_att_eeg_test.append(corr_att_trials_test)
+            corr_unatt_eeg_test.append(corr_unatt_trials_test)
+        return corr_att_eeg_train, corr_unatt_eeg_train, corr_att_eeg_test, corr_unatt_eeg_test
 
 
 class DiscriminativeCCA:
@@ -770,7 +843,7 @@ class DiscriminativeCCA:
             [signal_train, compete_train, target_train], [signal_test, compete_test, target_test] = self.train_list_folds[idx], self.test_list_folds[idx]
             Ws, Wy, _ = self.fit(signal_train, compete_train, target_train)
             # Ws, Wc, Wy, _ = self.fit_hetero(signal_train, compete_train, target_train)
-            Xs_trans, Xc_trans, Xy_trans = self.get_transformed_data(signal_test, compete_test, target_test, Ws, Wc, Wy)
+            Xs_trans, Xc_trans, Xy_trans = self.get_transformed_data(signal_test, compete_test, target_test, Ws, Ws, Wy)
             if Xs_trans.shape[0]-trial_len*self.fs >= 0:
                 if BOOTSTRAP:
                     nb_trials = Xs_trans.shape[0]//self.fs * 2
@@ -1897,37 +1970,27 @@ class GCCAPreprocessedCCA:
         train_unatt_folds, test_unatt_folds = utils.split_mm_balance_folds([feat_unatt_list], self.fold) if self.fold is not None else utils.split_multi_mod_LVO([feat_unatt_list], self.leave_out)
         print('After GCCA preprocessing, getting CCA results for attended and unattended trials...')
         CCA = CanonicalCorrelationAnalysis(self.eeg_onesubj_list, self.stim_list, self.fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=self.fold, leave_out=self.leave_out, n_components=self.n_components, regularization=self.K_regu, K_regu=self.K_regu, message=self.message, signifi_level=self.signifi_level, n_permu=self.n_permu, p_value=self.p_value)
-        corr_att_eeg = []
-        corr_unatt_eeg = []
+        corr_att_eeg_train = []
+        corr_unatt_eeg_train = []
+        corr_att_eeg_test = []
+        corr_unatt_eeg_test = []
         for idx in range(nb_folds):
             [EEG_trans_train, Att_train], [EEG_trans_test, Att_test] = self.preprocessed_train_folds[idx], self.preprocessed_test_folds[idx]
-            _, [Unatt_test] = train_unatt_folds[idx], test_unatt_folds[idx]
+            [Unatt_train], [Unatt_test] = train_unatt_folds[idx], test_unatt_folds[idx]
             EEG_train = EEG_trans_train[:,:,self.Subj_ID]
             EEG_test = EEG_trans_test[:,:,self.Subj_ID]
             _, _, _, _, V_eeg_train, V_feat_train, _ = CCA.fit(EEG_train, Att_train)
-            EEG_comp, Att_comp = CCA.get_transformed_data(EEG_test, Att_test, V_eeg_train, V_feat_train)
-            _, Unatt_comp = CCA.get_transformed_data(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
-            if EEG_comp.shape[0]-trial_len*self.fs >= 0:
-                if BOOTSTRAP:
-                    nb_trials = EEG_comp.shape[0]//self.fs * 2
-                    start_points = np.random.randint(0, EEG_comp.shape[0]-trial_len*self.fs, size=nb_trials)
-                else:
-                    start_points = None
-                EEG_comp_trials = utils.into_trials(EEG_comp, self.fs, trial_len, start_points=start_points)
-                Att_comp_trials = utils.into_trials(Att_comp, self.fs, trial_len, start_points=start_points)
-                Unatt_comp_trials = utils.into_trials(Unatt_comp, self.fs, trial_len, start_points=start_points)
-                corr_att_eeg_i = np.stack([CCA.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_comp_trials, Att_comp_trials)])
-                corr_unatt_eeg_i = np.stack([CCA.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_comp_trials, Unatt_comp_trials)])
-                corr_att_eeg.append(corr_att_eeg_i)
-                corr_unatt_eeg.append(corr_unatt_eeg_i)
-            else:
-                print('The length of the video is too short for the given trial length.')
-                # return NaN values
-                corr_att_eeg.append(np.full((1, self.n_components), np.nan))
-                corr_unatt_eeg.append(np.full((1, self.n_components), np.nan))
-        corr_att_eeg = np.concatenate(tuple(corr_att_eeg), axis=0)
-        corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
-        return corr_att_eeg, corr_unatt_eeg
+            corr_att_train, corr_unatt_train = CCA.get_corr_att_unatt_trials(EEG_train, Att_train, Unatt_train, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            corr_att_eeg_train.append(corr_att_train)
+            corr_unatt_eeg_train.append(corr_unatt_train)
+            corr_att_test, corr_unatt_test = CCA.get_corr_att_unatt_trials(EEG_test, Att_test, Unatt_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            corr_att_eeg_test.append(corr_att_test)
+            corr_unatt_eeg_test.append(corr_unatt_test)
+        corr_att_eeg_train = np.concatenate(tuple(corr_att_eeg_train), axis=0)
+        corr_unatt_eeg_train = np.concatenate(tuple(corr_unatt_eeg_train), axis=0)
+        corr_att_eeg_test = np.concatenate(tuple(corr_att_eeg_test), axis=0)
+        corr_unatt_eeg_test = np.concatenate(tuple(corr_unatt_eeg_test), axis=0)
+        return corr_att_eeg_train, corr_att_eeg_test, corr_unatt_eeg_train, corr_unatt_eeg_test
 
 
 class LSGCCA:
