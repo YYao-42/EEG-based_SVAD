@@ -1249,13 +1249,12 @@ def interpolate_blinks(ts, blinks):
     return time_series
     
 
-def create_corr_df(Subj_ID, sig_corr_fold, corr_att_fold, corr_unatt_fold):
-    sig_level = np.average(sig_corr_fold)
+def create_corr_df(Subj_ID, sig_corr_pool, corr_att_fold, corr_unatt_fold):
     corr_att = np.average(corr_att_fold, axis=0)
     corr_unatt = np.average(corr_unatt_fold, axis=0)
     n_component = len(corr_att)
     index = pd.MultiIndex.from_tuples([
-        ('Subj '+str(Subj_ID+1), sig_level, 'CC {}'.format(i+1))
+        ('Subj '+str(Subj_ID+1), sig_corr_pool, 'CC {}'.format(i+1))
         for i in range(n_component)
     ], names=['Subject ID', 'Sig Level', 'Component'])
     data = {
@@ -1265,6 +1264,24 @@ def create_corr_df(Subj_ID, sig_corr_fold, corr_att_fold, corr_unatt_fold):
     corr_df = pd.DataFrame(data, index=index)
     return corr_df
 
+def save_corr_df(table_name, sig_corr_pool, corr_att_fold, corr_unatt_fold, Subj_ID, OVERWRITE=False):
+    # check if the file exists
+    if not os.path.isfile(table_name):
+        res_df = create_corr_df(Subj_ID, sig_corr_pool, corr_att_fold, corr_unatt_fold)
+    else:
+        # read the dataframe
+        res_df = pd.read_csv(table_name, header=0, index_col=[0,1,2])                
+        if not 'Subj '+str(Subj_ID+1) in res_df.index.get_level_values('Subject ID'):
+            res_add = create_corr_df(Subj_ID, sig_corr_pool, corr_att_fold, corr_unatt_fold)
+            res_df = pd.concat([res_df, res_add], axis=0)
+        elif OVERWRITE:
+            res_df = res_df.drop('Subj '+str(Subj_ID+1), level='Subject ID')
+            res_add = create_corr_df(Subj_ID, sig_corr_pool, corr_att_fold, corr_unatt_fold)
+            res_df = pd.concat([res_df, res_add], axis=0)
+        else:
+            print(f"Results for Subj {Subj_ID+1} already exist in {table_name}")
+    with open(table_name, 'w') as f:
+        res_df.to_csv(f, header=True)
 
 def create_acc_df(Subj_ID, trial_len_list, acc_list):
     columns = ['Subject ID'] + ['Trial_len='+str(tl) for tl in trial_len_list]
@@ -1272,14 +1289,31 @@ def create_acc_df(Subj_ID, trial_len_list, acc_list):
     acc_df = pd.DataFrame([data], columns=columns)
     return acc_df
 
+def save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE=False):
+    if not os.path.isfile(table_name):
+        # create a pandas dataframe that contains Subj_ID, Corr_Att, Corr_Unatt, Sig_Corr
+        res_df = create_acc_df(Subj_ID, trial_len_list, res)
+    else:
+        # read the dataframe
+        res_df = pd.read_csv(table_name, header=0)
+        if ('Subj ' + str(Subj_ID + 1)) not in res_df['Subject ID'].values:
+            res_add = create_acc_df(Subj_ID, trial_len_list, res)
+            res_df = pd.concat([res_df, res_add], axis=0)
+        elif OVERWRITE:
+            res_df = res_df[res_df['Subject ID'] != 'Subj ' + str(Subj_ID + 1)]
+            res_add = create_acc_df(Subj_ID, trial_len_list, res)
+            res_df = pd.concat([res_df, res_add], axis=0)
+        else:
+            print(f"Results for Subj {Subj_ID+1} already exist in {table_name}")
+    with open(table_name, 'w') as f:
+        res_df.to_csv(f, header=True, index=False)
 
-def create_ISC_df(ISC_fold, ISCov_fold, sig_ISC_fold, mod_name):
-    sig_level = np.average(sig_ISC_fold)
+def create_ISC_df(ISC_fold, ISCov_fold, sig_ISC_pool, mod_name):
     ISC = np.average(ISC_fold, axis=0)
     ISCov = np.average(ISCov_fold, axis=0)
     n_component = len(ISC)
     index = pd.MultiIndex.from_tuples([
-        (mod_name, sig_level, 'CC {}'.format(i+1))
+        (mod_name, sig_ISC_pool, 'CC {}'.format(i+1))
         for i in range(n_component)
     ], names=['Modality', 'Sig Level (ISC)', 'Component'])
     data = {

@@ -670,6 +670,47 @@ class CanonicalCorrelationAnalysis:
         corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
         return corr_att_eeg, corr_unatt_eeg
 
+    def att_or_unatt_aug(self, aug_data_list, aug_feat_att_list, aug_mask_list, feat_unatt_list, trial_len=None, BOOTSTRAP=True):
+        aug_data = np.concatenate(tuple(aug_data_list+self.EEG_list[:2]), axis=0)
+        aug_feat = np.concatenate(tuple(aug_feat_att_list+self.Stim_list[:2]), axis=0)
+        aug_mask = np.concatenate(tuple(aug_mask_list+self.mask_list[:2]), axis=0)
+        nb_videos = len(self.Stim_list[2:])
+        nb_folds = nb_videos//self.leave_out
+        nested_datalist = [self.EEG_list[2:], self.Stim_list[2:], feat_unatt_list[2:], self.mask_list[2:]]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
+
+        corr_att_eeg = []
+        corr_unatt_eeg = []
+        corr_permu_fold = []
+        for idx in range(0, nb_folds):
+            [EEG_train, Att_train, _, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            EEG_train_aug = np.concatenate((EEG_train, aug_data), axis=0)
+            Att_train_aug = np.concatenate((Att_train, aug_feat), axis=0)
+            self.mask_train = np.concatenate((self.mask_train, aug_mask), axis=0)
+            _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train_aug, Att_train_aug)
+            if trial_len is not None:
+                corr_att_trials, corr_unatt_trials = self.get_corr_att_unatt_trials(EEG_test, Att_test, Unatt_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            else:
+                corr_att_trials, _, _, _ = self.cal_corr_coe(EEG_test, Att_test, V_eeg_train, V_feat_train)
+                corr_unatt_trials, _, _, _ = self.cal_corr_coe(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
+                corr_att_trials = np.expand_dims(corr_att_trials, axis=0)
+                corr_unatt_trials = np.expand_dims(corr_unatt_trials, axis=0)
+                corr_permu_fold.append(self.permutation_test(EEG_test, Att_test, V_A=V_eeg_train, V_B=V_feat_train))
+            corr_att_eeg.append(corr_att_trials)
+            corr_unatt_eeg.append(corr_unatt_trials)
+
+        corr_att_eeg = np.concatenate(tuple(corr_att_eeg), axis=0)
+        corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
+        if trial_len is None:
+            sig_corr_fold = [self.calculate_sig_corr(corr_permu) for corr_permu in corr_permu_fold]
+            corr_permu_all = np.concatenate(tuple(corr_permu_fold), axis=0)
+            sig_corr_pool = self.calculate_sig_corr(corr_permu_all, nb_fold=nb_folds)
+        else:
+            sig_corr_fold = None
+            sig_corr_pool = None
+        return corr_att_eeg, corr_unatt_eeg, sig_corr_fold, sig_corr_pool
+
     def att_or_unatt_classifer(self, feat_unatt_list, trial_len, BOOTSTRAP=True, V_eeg=None, V_Stim=None, COMBINE_ATT_UNATT=False):
         feat_att_list = self.Stim_list
         nb_videos = len(feat_att_list)
