@@ -182,23 +182,26 @@ def bandpass(data, fs, band):
     return filtered
 
 
-def extract_freq_band(eeg, fs, band):
+def extract_freq_band(eeg, fs, band, normalize=False):
     '''
     Extract frequency band from EEG data
     Inputs:
         eeg: EEG data
         fs: sampling frequency
         band: frequency band
+        normalize: whether to normalize the bandpassed data
     Outputs:
         eeg_band: bandpassed EEG data
     '''
     if eeg.ndim < 3:
         eeg_band = bandpass(eeg, fs, band)
+        eeg_band = eeg_band / np.linalg.norm(eeg_band, 'fro') if normalize else eeg_band
     else:
         N = eeg.shape[2]
         eeg_band =np.zeros_like(eeg)
         for n in range(N):
             eeg_band[:,:,n] = bandpass(eeg[:,:,n], fs, band)
+            eeg_band[:,:,n] = eeg_band[:,:,n] / np.linalg.norm(eeg_band[:,:,n], 'fro') if normalize else eeg_band[:,:,n]
     return eeg_band
 
 
@@ -1201,6 +1204,7 @@ def refine_saccades(saccade_multisubj_list, blink_multisubj_list):
     saccade_multisubj_list = [saccade.astype(float) for saccade in saccade_multisubj_list]
     return saccade_multisubj_list
 
+
 def get_mask_list(Sacc_list, before=15, after=30):
     mask_list = []
     for Sacc in Sacc_list:
@@ -1213,6 +1217,30 @@ def get_mask_list(Sacc_list, before=15, after=30):
         Sacc[idx_surround] = True
         mask_list.append(np.logical_not(Sacc))
     return mask_list
+
+
+def expand_mask(mask, lag, offset):
+    '''
+    If the mask will be applied to hankelized data, the mask should be expanded to cover the lags
+    '''
+    mask_correct_offset = list(np.squeeze(mask))
+    mask_correct_offset = (mask_correct_offset + offset*[True])
+    mask_exp = copy.deepcopy(mask_correct_offset)
+    for i in range(len(mask_correct_offset)):
+        if mask_correct_offset[i] == False:
+            end = min(i+lag, len(mask_correct_offset))
+            mask_exp[i:end] = (end-i)*[False]
+    return mask_exp[offset:]
+
+
+def data_loss_due_to_mask(mask_list, lag, offset):
+    '''
+    Calculate the percentage of data loss due to the mask
+    '''
+    mask_exp_list = [expand_mask(mask, lag, offset) for mask in mask_list]
+    data_loss = 1 - sum([sum(mask_exp) for mask_exp in mask_exp_list]) / sum([len(mask_exp) for mask_exp in mask_exp_list])
+    return data_loss
+
 
 def remove_saccade(datalist, Sacc, remove_before=15, remove_after=30):
     T = Sacc.shape[0]
@@ -1283,25 +1311,29 @@ def save_corr_df(table_name, sig_corr_pool, corr_att_fold, corr_unatt_fold, Subj
     with open(table_name, 'w') as f:
         res_df.to_csv(f, header=True)
 
-def create_acc_df(Subj_ID, trial_len_list, acc_list):
-    columns = ['Subject ID'] + ['Trial_len='+str(tl) for tl in trial_len_list]
-    data = ['Subj '+str(Subj_ID+1)] + acc_list
+def create_acc_df(Subj_ID, trial_len_list, acc_list, dataloss=None):
+    if dataloss is not None:
+        columns = ['Subject ID'] + ['Trial_len='+str(tl) for tl in trial_len_list] + ['Data Loss']
+        data = ['Subj '+str(Subj_ID+1)] + acc_list + [dataloss]
+    else:
+        columns = ['Subject ID'] + ['Trial_len='+str(tl) for tl in trial_len_list]
+        data = ['Subj '+str(Subj_ID+1)] + acc_list
     acc_df = pd.DataFrame([data], columns=columns)
     return acc_df
 
-def save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE=False):
+def save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE=False, data_loss=None):
     if not os.path.isfile(table_name):
         # create a pandas dataframe that contains Subj_ID, Corr_Att, Corr_Unatt, Sig_Corr
-        res_df = create_acc_df(Subj_ID, trial_len_list, res)
+        res_df = create_acc_df(Subj_ID, trial_len_list, res, data_loss)
     else:
         # read the dataframe
         res_df = pd.read_csv(table_name, header=0)
         if ('Subj ' + str(Subj_ID + 1)) not in res_df['Subject ID'].values:
-            res_add = create_acc_df(Subj_ID, trial_len_list, res)
+            res_add = create_acc_df(Subj_ID, trial_len_list, res, data_loss)
             res_df = pd.concat([res_df, res_add], axis=0)
         elif OVERWRITE:
             res_df = res_df[res_df['Subject ID'] != 'Subj ' + str(Subj_ID + 1)]
-            res_add = create_acc_df(Subj_ID, trial_len_list, res)
+            res_add = create_acc_df(Subj_ID, trial_len_list, res, data_loss)
             res_df = pd.concat([res_df, res_add], axis=0)
         else:
             print(f"Results for Subj {Subj_ID+1} already exist in {table_name}")

@@ -124,28 +124,14 @@ class CanonicalCorrelationAnalysis:
 
     def select_mask(self, length):
         if self.mask_list is not None:
-            # select the mask that matches X.shape[0]
             if len(self.mask_train) == length:
-                mask = list(np.squeeze(self.mask_train))
+                mask = self.mask_train
             else:
-                mask = list(np.squeeze(self.mask_test))
-            mask_EEG = copy.deepcopy(mask)
-            mask_Stim = copy.deepcopy(mask)
-            mask_EEG = (mask_EEG + self.offset_EEG*[True])[self.offset_EEG:]
-            mask_Stim = (mask_Stim + self.offset_Stim*[True])[self.offset_Stim:]
-            mask_lags_EEG = copy.deepcopy(mask_EEG)
-            mask_lags_Stim = copy.deepcopy(mask_Stim)
-            for i in range(len(mask)):
-                if mask_EEG[i] == False:
-                    end = min(i+self.L_EEG, len(mask))
-                    mask_lags_EEG[i:end] = (end-i)*[False]
-                if mask_Stim[i] == False:
-                    end = min(i+self.L_Stim, len(mask))
-                    mask_lags_Stim[i:end] = (end-i)*[False]
-            mask = np.logical_and(mask_lags_EEG, mask_lags_Stim)
+                mask = self.mask_test
+            mask_lags = utils.expand_mask(mask, self.L_EEG, self.offset_EEG)
         else:
-            mask = None
-        return mask
+            mask_lags = None
+        return mask_lags
 
     def fit(self, X, Y, V_A=None, V_B=None, Lam=None):
         if np.ndim(Y) == 1:
@@ -1905,7 +1891,7 @@ class StimulusInformedCorrCA(StimulusInformedGCCA):
 
 
 class GCCAPreprocessedCCA:
-    def __init__(self, Subj_ID, eeg_multisubj_list, stim_list, fs, para_gcca, para_cca_eeg, para_cca_stim, W_GCCA_folds=None, preprocessed_train_folds=None, preprocessed_test_folds = None, leave_out=2, fold=None, n_components=5, regularization='lwcov', K_regu=None, message=True, signifi_level=True, n_permu=500, p_value=0.05):
+    def __init__(self, Subj_ID, eeg_multisubj_list, stim_list, fs, para_gcca, para_cca_eeg, para_cca_stim, W_GCCA_folds=None, preprocessed_train_folds=None, preprocessed_test_folds=None, leave_out=2, fold=None, n_components_GCCA=192, n_components_CCA=3, regularization='lwcov', K_regu=None, message=True, signifi_level=True, n_permu=500, p_value=0.05):
         '''
         Subj_ID: Subject ID
         eeg_multisubj_list: list of EEG data, each element is a T(#sample)xD(#channel)xN(#subject) array
@@ -1936,7 +1922,8 @@ class GCCAPreprocessedCCA:
         # assert that only one of leave_out and fold is not None
         assert (leave_out is not None) ^ (fold is not None), "Only one of leave_out and fold should be not None"
         self.train_list_folds, self.test_list_folds = utils.split_mm_balance_folds([self.eeg_multisubj_list, self.stim_list], self.fold) if self.fold is not None else utils.split_multi_mod_LVO([self.eeg_multisubj_list, self.stim_list], self.leave_out)
-        self.n_components = n_components
+        self.n_components_GCCA = n_components_GCCA
+        self.n_components_CCA = n_components_CCA
         self.regularization = regularization
         self.K_regu = K_regu
         self.message = message
@@ -1949,7 +1936,7 @@ class GCCAPreprocessedCCA:
         self.W_GCCA_folds = []
         self.preprocessed_train_folds = []
         self.preprocessed_test_folds = []
-        GCCA = GeneralizedCCA(self.eeg_multisubj_list, self.fs, L_EEG, offset_EEG, n_components=self.n_components, regularization=self.regularization)
+        GCCA = GeneralizedCCA(self.eeg_multisubj_list, self.fs, L_EEG, offset_EEG, n_components=self.n_components_GCCA, regularization=self.regularization)
         for train_mm, test_mm in tqdm(zip(self.train_list_folds, self.test_list_folds)):
             [EEG_train, Stim_train], [EEG_test, Stim_test] = train_mm, test_mm
             W, _, _, _ = GCCA.fit(EEG_train)
@@ -1968,20 +1955,98 @@ class GCCAPreprocessedCCA:
         F = (lstsq(EEG_trans, EEG_ori)[0]).T
         return F
 
+    def get_transformed_data(self, X, Y, V_A, V_B):
+        L_EEG, offset_EEG = self.para_cca_eeg
+        L_Stim, offset_Stim = self.para_cca_stim
+        mtx_X = utils.block_Hankel(X, L_EEG, offset_EEG)
+        mtx_Y = utils.block_Hankel(Y, L_Stim, offset_Stim)
+        mtx_X_centered = mtx_X - np.mean(mtx_X, axis=0, keepdims=True)
+        mtx_Y_centered = mtx_Y - np.mean(mtx_Y, axis=0, keepdims=True)
+        X_trans = mtx_X_centered@V_A
+        Y_trans = mtx_Y_centered@V_B
+        return X_trans, Y_trans
+
+    def get_corr_coe(self, X_trans, Y_trans):
+        corr_pvalue = [pearsonr(X_trans[:,k], Y_trans[:,k]) for k in range(self.n_components_CCA)]
+        corr_coe = np.array([corr_pvalue[k][0] for k in range(self.n_components_CCA)])
+        return corr_coe
+
+    def get_sim(self, EEG_indiv, EEG_avg, dim_subspace):
+        # Calulate TSC between the individual EEG components and the average EEG components (as a measure of the similarity between the individual EEG components and the average EEG components)
+        # dim_subspace = 3
+        # CCA_EEG = CanonicalCorrelationAnalysis([EEG_indiv], [EEG_avg], self.fs, L_EEG=1, L_Stim=1, leave_out=None, regularization=self.regularization, signifi_level=False, n_components=dim_subspace, dim_subspace=dim_subspace)
+        # _, tsc, _, _, _, _, _ = CCA_EEG.fit(EEG_indiv[:,:dim_subspace], EEG_avg[:,:dim_subspace])
+        corr_comp = [np.corrcoef(EEG_indiv[:,k], EEG_avg[:,k])[0,1] for k in range(dim_subspace)]
+        sim = np.array(corr_comp)
+        return sim
+
+    def get_corr_sim_trials(self, EEG_indiv, EEG_avg, Att, Unatt, V_eeg, V_feat, BOOTSTRAP, trial_len):
+        X_trans, Y_att_trans = self.get_transformed_data(EEG_indiv, Att, V_eeg, V_feat)
+        _, Y_unatt_trans = self.get_transformed_data(EEG_indiv, Unatt, V_eeg, V_feat)
+        dim_subspace = 2
+        if X_trans.shape[0]-trial_len*self.fs >= 0:
+            if BOOTSTRAP:
+                nb_trials = min(X_trans.shape[0]//self.fs * 2, 1000)
+                start_points = np.random.randint(0, X_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+            else:
+                start_points = None
+            X_trials = utils.into_trials(X_trans, self.fs, trial_len, start_points=start_points)
+            Y_att_trials = utils.into_trials(Y_att_trans, self.fs, trial_len, start_points=start_points)
+            Y_unatt_trials = utils.into_trials(Y_unatt_trans, self.fs, trial_len, start_points=start_points)
+            EEG_avg_trials = utils.into_trials(EEG_avg, self.fs, trial_len, start_points=start_points)
+            EEG_indiv_trials = utils.into_trials(EEG_indiv, self.fs, trial_len, start_points=start_points)
+            corr_att_trials = np.stack([self.get_corr_coe(eeg, att) for eeg, att in zip(X_trials, Y_att_trials)])
+            corr_unatt_trials = np.stack([self.get_corr_coe(eeg, unatt) for eeg, unatt in zip(X_trials, Y_unatt_trials)])
+            sim_avg_indiv_trials = np.stack([self.get_sim(indiv, avg, dim_subspace) for indiv, avg in zip(EEG_indiv_trials, EEG_avg_trials)])
+        else:
+            print('The length of the video is too short for the given trial length.')
+            # return NaN values
+            corr_att_trials = np.full((1, self.n_components_CCA), np.nan)
+            corr_att_trials = np.full((1, self.n_components_CCA), np.nan)
+            sim_avg_indiv_trials = np.full((1, dim_subspace), np.nan)
+        return corr_att_trials, corr_unatt_trials, sim_avg_indiv_trials
+
+    def search_para(self, nb_comp_kept_grid=range(16, 200, 16)):
+        print('Getting GCCA results...')
+        if self.W_GCCA_folds is None:
+            _, _, _ = self.get_GCCA_results()
+        data_for_search = self.preprocessed_train_folds
+        nb_folds = len(data_for_search)
+        L_EEG, offset_EEG = self.para_cca_eeg
+        L_Stim, offset_Stim = self.para_cca_stim
+        corr_grid = []
+        print('Searching for the optimal number of components...')
+        for nb_comp in nb_comp_kept_grid:
+            corr_val_fold = np.zeros(nb_folds)
+            for idx in range(nb_folds):
+                [EEG, Stim] = data_for_search[idx]
+                EEG = np.mean(EEG[:,:nb_comp,:], axis=-1)
+                [eeg_train, stim_train], [eeg_val, stim_val] = utils.split_multi_mod([EEG, Stim], fold=10, fold_idx=idx+1) # nb_folds should be smaller than 10
+                CCA = CanonicalCorrelationAnalysis(self.eeg_onesubj_list, self.stim_list, self.fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=self.fold, leave_out=self.leave_out, n_components=1, regularization=self.regularization, signifi_level=False)
+                _, _, _, _, V_A_train, V_B_train, _ = CCA.fit(eeg_train, stim_train)
+                corr_val_fold[idx], _, _, _ = CCA.cal_corr_coe(eeg_val, stim_val, V_A_train, V_B_train)
+            # print('Number of components kept: {}, averaged CC1: {}'.format(nb_comp, np.mean(corr_val_fold)))
+            corr_grid.append(np.mean(corr_val_fold))
+        best_nb_comp = nb_comp_kept_grid[np.argmax(corr_grid)]
+        print('Best number of components: {}'.format(best_nb_comp))
+        self.preprocessed_train_folds = [[datalist[0][:,:best_nb_comp,:], datalist[1]] for datalist in self.preprocessed_train_folds]
+        self.preprocessed_test_folds = [[datalist[0][:,:best_nb_comp,:], datalist[1]] for datalist in self.preprocessed_test_folds]
+        return best_nb_comp
+
     def cross_val(self):
         print('Getting GCCA results...')
         if self.W_GCCA_folds is None:
             _, _, _ = self.get_GCCA_results()
-        L_EEG, offset_EEG = self.para_gcca
+        L_EEG, offset_EEG = self.para_cca_eeg
         L_Stim, offset_Stim = self.para_cca_stim
         nb_folds = len(self.preprocessed_train_folds)
-        n_components = self.n_components
+        n_components = self.n_components_CCA
         corr_train_fold = np.zeros((nb_folds, n_components))
         corr_test_fold = np.zeros((nb_folds, n_components))
         forward_model_fold = []
         EEG_comp_fold = []
         print('After GCCA preprocessing, getting CCA cross-validation results...')
-        CCA = CanonicalCorrelationAnalysis(self.eeg_onesubj_list, self.stim_list, self.fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=self.fold, leave_out=self.leave_out, n_components=self.n_components, regularization=self.K_regu, K_regu=self.K_regu, message=self.message, signifi_level=self.signifi_level, n_permu=self.n_permu, p_value=self.p_value)
+        CCA = CanonicalCorrelationAnalysis(self.eeg_onesubj_list, self.stim_list, self.fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=self.fold, leave_out=self.leave_out, n_components=n_components, regularization=self.regularization, K_regu=self.K_regu, message=self.message, signifi_level=self.signifi_level, n_permu=self.n_permu, p_value=self.p_value)
         idx = 0
         for train_mm, test_mm in tqdm(zip(self.preprocessed_train_folds, self.preprocessed_test_folds)):
             [EEG_trans_train, Stim_train], [EEG_trans_test, Stim_test] = train_mm, test_mm
@@ -2001,37 +2066,42 @@ class GCCAPreprocessedCCA:
             print('Average correlation coefficients of the top {} components on the test sets: {}'.format(n_components, np.average(corr_test_fold, axis=0)))
         return corr_train_fold, corr_test_fold, forward_model_fold, forward_model_all
 
-    def att_or_unatt_trials(self, feat_unatt_list, trial_len, BOOTSTRAP=True):
+    def att_or_unatt_trials(self, feat_unatt_list, trial_len, BOOTSTRAP=True, COMP_FROM_AVG_COMP=False):
         print('Getting GCCA results...')
         if self.W_GCCA_folds is None:
             _, _, _ = self.get_GCCA_results()
-        L_EEG, offset_EEG = self.para_gcca
+        L_EEG, offset_EEG = self.para_cca_eeg
         L_Stim, offset_Stim = self.para_cca_stim
         nb_folds = len(self.preprocessed_train_folds)
         train_unatt_folds, test_unatt_folds = utils.split_mm_balance_folds([feat_unatt_list], self.fold) if self.fold is not None else utils.split_multi_mod_LVO([feat_unatt_list], self.leave_out)
         print('After GCCA preprocessing, getting CCA results for attended and unattended trials...')
-        CCA = CanonicalCorrelationAnalysis(self.eeg_onesubj_list, self.stim_list, self.fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=self.fold, leave_out=self.leave_out, n_components=self.n_components, regularization=self.K_regu, K_regu=self.K_regu, message=self.message, signifi_level=self.signifi_level, n_permu=self.n_permu, p_value=self.p_value)
+        CCA = CanonicalCorrelationAnalysis(self.eeg_onesubj_list, self.stim_list, self.fs, L_EEG, L_Stim, offset_EEG, offset_Stim, fold=self.fold, leave_out=self.leave_out, n_components=self.n_components_CCA, regularization=self.regularization, K_regu=self.K_regu, message=self.message, signifi_level=self.signifi_level, n_permu=self.n_permu, p_value=self.p_value)
         corr_att_eeg_train = []
         corr_unatt_eeg_train = []
         corr_att_eeg_test = []
         corr_unatt_eeg_test = []
+        sim_avg_indiv = [] # holds the similarity measurements between the averaged GCCA components and individual GCCA components
         for idx in range(nb_folds):
             [EEG_trans_train, Att_train], [EEG_trans_test, Att_test] = self.preprocessed_train_folds[idx], self.preprocessed_test_folds[idx]
             [Unatt_train], [Unatt_test] = train_unatt_folds[idx], test_unatt_folds[idx]
-            EEG_train = EEG_trans_train[:,:,self.Subj_ID]
-            EEG_test = EEG_trans_test[:,:,self.Subj_ID]
+            EEG_train = np.mean(EEG_trans_train, axis=-1) if COMP_FROM_AVG_COMP else EEG_trans_train[:,:,self.Subj_ID]
+            EEG_train_avg = np.mean(EEG_trans_train, axis=-1)
+            EEG_test = np.mean(EEG_trans_test, axis=-1) if COMP_FROM_AVG_COMP else EEG_trans_test[:,:,self.Subj_ID]
+            EEG_test_avg = np.mean(EEG_trans_test, axis=-1)
             _, _, _, _, V_eeg_train, V_feat_train, _ = CCA.fit(EEG_train, Att_train)
-            corr_att_train, corr_unatt_train = CCA.get_corr_att_unatt_trials(EEG_train, Att_train, Unatt_train, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            corr_att_train, corr_unatt_train, _ = self.get_corr_sim_trials(EEG_train, EEG_train_avg, Att_train, Unatt_train, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
             corr_att_eeg_train.append(corr_att_train)
             corr_unatt_eeg_train.append(corr_unatt_train)
-            corr_att_test, corr_unatt_test = CCA.get_corr_att_unatt_trials(EEG_test, Att_test, Unatt_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            corr_att_test, corr_unatt_test, sim_avg_indiv_test = self.get_corr_sim_trials(EEG_test, EEG_test_avg, Att_test, Unatt_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
             corr_att_eeg_test.append(corr_att_test)
             corr_unatt_eeg_test.append(corr_unatt_test)
+            sim_avg_indiv.append(sim_avg_indiv_test)
         corr_att_eeg_train = np.concatenate(tuple(corr_att_eeg_train), axis=0)
         corr_unatt_eeg_train = np.concatenate(tuple(corr_unatt_eeg_train), axis=0)
         corr_att_eeg_test = np.concatenate(tuple(corr_att_eeg_test), axis=0)
         corr_unatt_eeg_test = np.concatenate(tuple(corr_unatt_eeg_test), axis=0)
-        return corr_att_eeg_train, corr_att_eeg_test, corr_unatt_eeg_train, corr_unatt_eeg_test
+        sim_avg_indiv = np.concatenate(tuple(sim_avg_indiv), axis=0)
+        return corr_att_eeg_train, corr_att_eeg_test, corr_unatt_eeg_train, corr_unatt_eeg_test, sim_avg_indiv
 
 
 class LSGCCA:
