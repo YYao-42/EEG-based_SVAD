@@ -1205,7 +1205,7 @@ def refine_saccades(saccade_multisubj_list, blink_multisubj_list):
     return saccade_multisubj_list
 
 
-def get_mask_list(Sacc_list, before=15, after=30):
+def get_mask_list(Sacc_list, before=15, after=30, ThreeD=False):
     mask_list = []
     for Sacc in Sacc_list:
         T = Sacc.shape[0]
@@ -1215,7 +1215,10 @@ def get_mask_list(Sacc_list, before=15, after=30):
         idx_surround = np.unique(idx_surround)
         idx_surround = idx_surround[(idx_surround>=0) & (idx_surround<T)]
         Sacc[idx_surround] = True
-        mask_list.append(np.logical_not(Sacc))
+        mask = np.logical_not(Sacc)
+        if ThreeD:
+            mask = np.expand_dims(mask, axis=2)
+        mask_list.append(mask)
     return mask_list
 
 

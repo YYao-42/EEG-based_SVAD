@@ -697,6 +697,42 @@ class CanonicalCorrelationAnalysis:
             sig_corr_pool = None
         return corr_att_eeg, corr_unatt_eeg, sig_corr_fold, sig_corr_pool
 
+    def att_or_unatt_aug_multisubj(self, aug_data_list, aug_feat_att_list, aug_mask_list, feat_unatt_list, trial_len=None, BOOTSTRAP=True):
+        # data are 3D (containing multiple subjects)
+        nb_subj = aug_data_list[0].shape[2]
+        aug_data = np.concatenate(tuple(aug_data_list), axis=0)
+        aug_feat = np.concatenate(tuple(aug_feat_att_list), axis=0)
+        aug_mask = np.concatenate(tuple(aug_mask_list), axis=0)
+        test_data = np.concatenate(tuple(self.EEG_list), axis=0)
+        test_att_feat = np.concatenate(tuple(self.Stim_list), axis=0)
+        test_unatt_feat = np.concatenate(tuple(feat_unatt_list), axis=0)
+        test_mask = np.concatenate(tuple(self.mask_list), axis=0)
+
+        # Initialize dictionaries to store the correlation coefficients, with keys the subject index and values None
+        corr_att_eeg ={subj: None for subj in range(nb_subj)}
+        corr_unatt_eeg = {subj: None for subj in range(nb_subj)}
+
+        EEG_train_aug = np.concatenate(tuple([aug_data[:,:,i] for i in range(nb_subj)]), axis=0)
+        Att_train_aug = np.concatenate([aug_feat[:,:,i] for i in range(nb_subj)], axis=0) if aug_feat.ndim == 3 else np.concatenate([aug_feat for i in range(nb_subj)], axis=0)
+        self.mask_train = np.concatenate([aug_mask[:,:,i] for i in range(nb_subj)], axis=0)
+        _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train_aug, Att_train_aug)
+        for subj in range(nb_subj):
+            EEG_test_subj = test_data[:,:,subj]
+            Att_test_subj = test_att_feat[:,:,subj] if test_att_feat.ndim == 3 else test_att_feat
+            Unatt_test_subj = test_unatt_feat[:,:,subj] if test_unatt_feat.ndim == 3 else test_unatt_feat
+            self.mask_test = test_mask[:,:,subj]
+            if trial_len is not None:
+                corr_att_trials, corr_unatt_trials = self.get_corr_att_unatt_trials(EEG_test_subj, Att_test_subj, Unatt_test_subj, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            else:
+                corr_att_trials, _, _, _ = self.cal_corr_coe(EEG_test_subj, Att_test_subj, V_eeg_train, V_feat_train)
+                corr_unatt_trials, _, _, _ = self.cal_corr_coe(EEG_test_subj, Unatt_test_subj, V_eeg_train, V_feat_train)
+                corr_att_trials = np.expand_dims(corr_att_trials, axis=0)
+                corr_unatt_trials = np.expand_dims(corr_unatt_trials, axis=0)
+            # change the values of the dictionaries
+            corr_att_eeg[subj] = corr_att_trials if corr_att_eeg[subj] is None else np.concatenate((corr_att_eeg[subj], corr_att_trials), axis=0)
+            corr_unatt_eeg[subj] = corr_unatt_trials if corr_unatt_eeg[subj] is None else np.concatenate((corr_unatt_eeg[subj], corr_unatt_trials), axis=0)
+        return corr_att_eeg, corr_unatt_eeg
+
     def att_or_unatt_classifer(self, feat_unatt_list, trial_len, BOOTSTRAP=True, V_eeg=None, V_Stim=None, COMBINE_ATT_UNATT=False):
         feat_att_list = self.Stim_list
         nb_videos = len(feat_att_list)
