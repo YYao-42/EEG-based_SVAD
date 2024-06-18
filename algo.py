@@ -1318,6 +1318,7 @@ class GeneralizedCCA_MultiMod:
         sig_idx = -int(self.n_permu*self.p_value*self.n_components*nb_fold)
         corr_trials = np.sort(abs(corr_trials), axis=None)
         return corr_trials[sig_idx]
+    
     def cross_val(self):
         fold = self.fold
         n_components = self.n_components
@@ -1385,6 +1386,42 @@ class GeneralizedCCA_MultiMod:
             print('Average ISC of the top {} components on the test sets: {}'.format(n_components, np.average(corr_eeg_test, axis=0)))
             print('Significance level: ISC={}'.format(sig_corr_pool))
         return corr_all_test, cov_all_test, corr_eeg_test, cov_eeg_test, sig_corr_fold, sig_corr_pool, forward_model_fold
+
+    def att_or_unatt_LVO_trials(self, trial_len):
+        nb_videos = len(self.nested_datalist[0])
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(self.nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
+        isc_att = []
+        isc_unatt = []
+
+        for idx in range(0, nb_folds):
+            data_mm_train, Att_train, _ = train_list_folds[idx][:-2], train_list_folds[idx][-2], train_list_folds[idx][-1]
+            data_mm_test, Att_test, Unatt_test = test_list_folds[idx][:-2], test_list_folds[idx][-2], test_list_folds[idx][-1]
+            W_list, _, _ = self.fit(data_mm_train+[Att_train])
+
+            if Att_test.shape[0]-trial_len*self.fs >= 0:
+                nb_trials = Att_test.shape[0]//self.fs * 2
+                start_points = np.random.randint(0, Att_test.shape[0]-trial_len*self.fs, size=nb_trials)
+                data_mm_trials = [utils.into_trials(data, self.fs, trial_len, start_points=start_points) for data in data_mm_test]
+                Att_trials = utils.into_trials(Att_test, self.fs, trial_len, start_points=start_points)
+                Unatt_trials = utils.into_trials(Unatt_test, self.fs, trial_len, start_points=start_points)
+                # start_points = np.random.randint(0, Att_test.shape[0]-trial_len*self.fs, size=nb_trials)
+                # Unatt_trials = utils.into_trials(Unatt_test, self.fs, trial_len, start_points=start_points)
+                isc_att_i = [self.avg_stats([data[i] for data in data_mm_trials+[Att_trials]], W_list)[0] for i in range(len(Att_trials))]
+                isc_unatt_i = [self.avg_stats([data[i] for data in data_mm_trials+[Unatt_trials]], W_list)[0] for i in range(len(Unatt_trials))]
+                isc_att.append(isc_att_i)
+                isc_unatt.append(isc_unatt_i)
+            else:
+                print('The length of the video is too short for the given trial length.')
+                # return NaN values
+                isc_att.append(np.full((1, self.n_components), np.nan))
+                isc_unatt.append(np.full((1, self.n_components), np.nan))
+        isc_att = np.concatenate(tuple(isc_att), axis=0)
+        isc_unatt = np.concatenate(tuple(isc_unatt), axis=0)
+        return isc_att, isc_unatt
+
 
 
 class CorrelatedComponentAnalysis(GeneralizedCCA):
