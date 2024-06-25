@@ -139,6 +139,16 @@ def further_regress_out_list(X_list, confound_list, L_d, L_c, offset_d, offset_c
     return X_reg_list
 
 
+def regress_out_confounds(data_list, feat_att_list, feat_unatt_list, confound_list, L_data, L_Stim, offset_data, offset_Stim):
+    '''
+    Regressing confound (modality to be controlled) out of the data and features
+    '''
+    data_reg = further_regress_out_list(data_list, confound_list, L_data, L_data, offset_data, offset_data)
+    feat_att_reg = further_regress_out_list(feat_att_list, confound_list, L_Stim, L_data, offset_Stim, offset_data)
+    feat_unatt_reg = further_regress_out_list(feat_unatt_list, confound_list, L_Stim, L_data, offset_Stim, offset_data)
+    return (data_reg, feat_att_reg, feat_unatt_reg)
+
+
 def stack_modal(modal_nested_list):
     nb_video = len(modal_nested_list[0])
     dim_list = [modal[0].shape[1] for modal in modal_nested_list]
@@ -943,7 +953,7 @@ def plot_spatial_resp_fold(forward_model_fold, corr_att_fold, corr_unatt_fold, s
         if corr_unatt_fold is not None:
             corr_unatt_fold = np.mean(corr_unatt_fold, axis=0, keepdims=1)
         sig_corr_fold = [np.mean(sig_corr_fold)] if sig_corr_fold is not None else None
-        forward_model_fold = [np.abs(fm) for fm in forward_model_fold]
+        # forward_model_fold = [np.abs(fm) for fm in forward_model_fold]
         forward_model_fold = [np.mean(forward_model_fold, axis=0)]
         file_name = file_name.replace('Folds', 'Avg')
     biosemi_layout = mne.channels.read_layout('biosemi')
