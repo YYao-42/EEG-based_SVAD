@@ -398,15 +398,16 @@ def into_trials(data, fs, t=60, start_points=None):
     return data_trials
 
 
-def select_distractors(data, fs, t, start_point):
+def select_distractors(data_list, fs, t, start_point):
+    assert all(data.shape[0] == data_list[0].shape[0] for data in data_list)
     adjacent_start = max(start_point - fs, 0)
-    adjacent_end = min(start_point + (t+1)*fs, data.shape[0])
+    adjacent_end = min(start_point + (t+1)*fs, data_list[0].shape[0])
     # remove the target trial from the data
-    data_distractor = np.delete(data, range(adjacent_start, adjacent_end), axis=0)
+    data_distractor_list = [np.delete(data, range(adjacent_start, adjacent_end), axis=0) for data in data_list]
     # randomly select one trial from the rest of the data
-    start_points_distractor = np.random.randint(0, len(data_distractor)-t*fs, size=1)[0]
-    seg_distractor = data_distractor[start_points_distractor:start_points_distractor+t*fs, ...]
-    return seg_distractor
+    start_points_distractor = np.random.randint(0, len(data_distractor_list[0])-t*fs, size=1)[0]
+    seg_distractor_list = [data_distractor[start_points_distractor:start_points_distractor+t*fs, ...] for data_distractor in data_distractor_list]
+    return seg_distractor_list
 
 
 def shift_trials(data_trials, shift=None):
@@ -1032,17 +1033,22 @@ def create_dir(path, CLEAR=False):
             os.remove(path + file)
 
 
-def get_features(feats_path_folder, video_id, len_seg, offset=None, smooth=True):
-    with open(feats_path_folder + video_id + '_mask.pkl', 'rb') as f:
-        feats = pickle.load(f)
-    feats = np.concatenate(tuple(feats), axis=0)
-    feats = clean_features(feats, smooth=smooth)
+def get_features(feats_path_folder, video_id, len_seg, offset=None, smooth=True, GAZEFEATS=False):
+    if not GAZEFEATS:
+        with open(feats_path_folder + video_id + '_mask.pkl', 'rb') as f:
+            feats = pickle.load(f)
+        feats = np.concatenate(tuple(feats), axis=0)
+        feats = clean_features(feats, smooth=smooth)
+    else:
+        feats = np.load(feats_path_folder + video_id + '_reweight.npy')
+        for n in range(feats.shape[-1]):
+            feats[..., n] = clean_features(feats[..., n], smooth=smooth)
     if offset is not None:
         end_idx = min(offset + len_seg, feats.shape[0])
         start_idx = end_idx - len_seg
-        feats = feats[start_idx:end_idx, :]
+        feats = feats[start_idx:end_idx, ...]
     else:
-        feats = feats[:len_seg, :]
+        feats = feats[:len_seg, ...]
     return feats
 
 
@@ -1072,7 +1078,7 @@ def get_eeg_eog(eeg_path, fsStim, bads, expdim=True):
     return eeg_downsampled, eog_downsampled, fs
 
 
-def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, expdim=True):
+def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, GAZEFEATS=False, expdim=True):
     eeg_files_all = [file for file in os.listdir(eeg_folder) if file.endswith('.set')]
     if singleobj:
         files = [file for file in eeg_files_all if len(file.split('_')) == 1]
@@ -1107,15 +1113,15 @@ def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, e
             name = file[:-4]
             id_att = name.split('_')[-1]
             if singleobj:
-                feats_att = get_features(feats_path_folder, id_att, len_seg, offset=None, smooth=True)
+                feats_att = get_features(feats_path_folder, id_att, len_seg, offset=None, smooth=True, GAZEFEATS=GAZEFEATS)
                 feats_unatt = None
             else:
                 offset = 122 * fsStim
                 ids = set(name.split('_'))
                 ids.remove(id_att)
                 id_unatt = ids.pop()
-                feats_att = get_features(feats_path_folder, id_att, len_seg, offset, smooth=True)
-                feats_unatt = get_features(feats_path_folder, id_unatt, len_seg, offset, smooth=True)
+                feats_att = get_features(feats_path_folder, id_att, len_seg, offset, smooth=True, GAZEFEATS=GAZEFEATS)
+                feats_unatt = get_features(feats_path_folder, id_unatt, len_seg, offset, smooth=True, GAZEFEATS=GAZEFEATS)
             feat_att_list.append(feats_att)
             feat_unatt_list.append(feats_unatt)
     else:
@@ -1124,15 +1130,15 @@ def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, e
     return eeg_list, eog_list, feat_att_list, feat_unatt_list, gaze_list, fs, nb_files, len_seg_list
 
 
-def data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, SAVE=True):
+def data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, GAZEFEATS, SAVE=True):
     PATTERN = subj_path[0].split('/')[-3]
     data_path = 'data/' + PATTERN + '/'
     if not os.path.exists(data_path):
         os.makedirs(data_path)
     nb_subj = len(subj_path)
-    eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, nb_files, len_seg_list = data_per_subj(subj_path[0], fsStim, bads[0], singleobj, feats_path_folder)
+    eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, nb_files, len_seg_list = data_per_subj(subj_path[0], fsStim, bads[0], singleobj, feats_path_folder, GAZEFEATS)
     for n in range(1,nb_subj):
-        eeg_list, eog_list, _, _, gaze_list, _, nb_files_sub, _ = data_per_subj(subj_path[n], fsStim, bads[n], singleobj, feats_path_folder=None)
+        eeg_list, eog_list, _, _, gaze_list, _, nb_files_sub, _ = data_per_subj(subj_path[n], fsStim, bads[n], singleobj)
         assert nb_files == nb_files_sub
         eeg_multisubj_list = [np.concatenate((eeg_multisubj_list[i], eeg_list[i]), axis=2) for i in range(nb_files)]
         eog_multisubj_list = [np.concatenate((eog_multisubj_list[i], eog_list[i]), axis=2) for i in range(nb_files)]
@@ -1140,20 +1146,26 @@ def data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, SAVE=
     if SAVE:
         # save all data (eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, fs, nb_files) into a single file
         data = {'eeg_multisubj_list': eeg_multisubj_list, 'eog_multisubj_list': eog_multisubj_list, 'feat_att_list': feat_att_list, 'feat_unatt_list': feat_unatt_list, 'gaze_multisubj_list': gaze_multisubj_list, 'fs': fs, 'len_seg_list': len_seg_list}
-        file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+        if not GAZEFEATS:
+            file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+        else:
+            file_name = 'data_singleobj_frw.pkl' if singleobj else 'data_twoobj_frw.pkl'
         with open(data_path + file_name, 'wb') as f:
             pickle.dump(data, f)
     return eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list
 
 
-def add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj):
+def add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj, GAZEFEATS=False):
     PATTERN = subj_path[0].split('/')[-3]
     data_path = 'data/' + PATTERN + '/'
-    file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+    if not GAZEFEATS:
+        file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+    else:
+        file_name = 'data_singleobj_frw.pkl' if singleobj else 'data_twoobj_frw.pkl'
     with open(data_path + file_name, 'rb') as f:
         data = pickle.load(f)
     nb_subj_old = data['eeg_multisubj_list'][0].shape[2]
-    eeg_multisubj_add, eog_multisubj_add, _, _, gaze_multisubj_add, _, _ = data_multi_subj(subj_path[nb_subj_old:], fsStim, bads[nb_subj_old:], singleobj, feats_path_folder, SAVE=False)
+    eeg_multisubj_add, eog_multisubj_add, _, _, gaze_multisubj_add, _, _ = data_multi_subj(subj_path[nb_subj_old:], fsStim, bads[nb_subj_old:], singleobj, feats_path_folder, GAZEFEATS, SAVE=False)
     eeg_multisubj_list = [np.concatenate((old, new), axis=2) for old, new in zip(data['eeg_multisubj_list'], eeg_multisubj_add)]
     eog_multisubj_list = [np.concatenate((old, new), axis=2) for old, new in zip(data['eog_multisubj_list'], eog_multisubj_add)]
     gaze_multisubj_list = [np.concatenate((old, new), axis=2) for old, new in zip(data['gaze_multisubj_list'], gaze_multisubj_add)]
@@ -1179,8 +1191,11 @@ def remove_shot_cuts(data, fs, time_points=None, remove_time=1):
     return data_clean
 
 
-def load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj, LOAD_ONLY, ALL_NEW):
-    file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+def load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj, LOAD_ONLY, ALL_NEW, GAZEFEATS=False):
+    if not GAZEFEATS:
+        file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
+    else:
+        file_name = 'data_singleobj_frw.pkl' if singleobj else 'data_twoobj_frw.pkl'
     if LOAD_ONLY:
         data_path = 'data/' + PATTERN + '/'
         with open(data_path + file_name, 'rb') as f:
@@ -1194,7 +1209,7 @@ def load_data(subj_path, fsStim, bads, feats_path_folder, PATTERN, singleobj, LO
         len_seg_list = data['len_seg_list']
     else:
         if ALL_NEW:
-            eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list = data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder)
+            eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list = data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, GAZEFEATS)
         else:
             eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list = add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj)
     return eeg_multisubj_list, eog_multisubj_list, feat_att_list, feat_unatt_list, gaze_multisubj_list, fs, len_seg_list
@@ -1391,17 +1406,36 @@ def save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE=False, data_
     with open(table_name, 'w') as f:
         res_df.to_csv(f, header=True, index=False)
 
+# def create_ISC_df(ISC_fold, ISCov_fold, sig_ISC_pool, mod_name):
+#     ISC = np.average(ISC_fold, axis=0)
+#     ISCov = np.average(ISCov_fold, axis=0)
+#     n_component = len(ISC)
+#     index = pd.MultiIndex.from_tuples([
+#         (mod_name, sig_ISC_pool, 'CC {}'.format(i+1))
+#         for i in range(n_component)
+#     ], names=['Modality', 'Sig Level (ISC)', 'Component'])
+#     data = {
+#         'ISC': ISC,
+#         'ISCov': ISCov
+#     }
+#     ISC_df = pd.DataFrame(data, index=index)
+#     return ISC_df
+
 def create_ISC_df(ISC_fold, ISCov_fold, sig_ISC_pool, mod_name):
-    ISC = np.average(ISC_fold, axis=0)
-    ISCov = np.average(ISCov_fold, axis=0)
-    n_component = len(ISC)
+    n_folds = ISC_fold.shape[0]
+    n_component = ISC_fold.shape[1]
+    # Flatten the ISC and ISCov arrays to include fold information
+    ISC_flat = ISC_fold.flatten()
+    ISCov_flat = ISCov_fold.flatten()
+    # Create a MultiIndex to include fold information
     index = pd.MultiIndex.from_tuples([
-        (mod_name, sig_ISC_pool, 'CC {}'.format(i+1))
+        (mod_name, sig_ISC_pool, f'CC {i+1}', f'Fold {j+1}')
+        for j in range(n_folds)
         for i in range(n_component)
-    ], names=['Modality', 'Sig Level (ISC)', 'Component'])
+    ], names=['Modality', 'Sig Level (ISC)', 'Component', 'Fold'])
     data = {
-        'ISC': ISC,
-        'ISCov': ISCov
+        'ISC': ISC_flat,
+        'ISCov': ISCov_flat
     }
     ISC_df = pd.DataFrame(data, index=index)
     return ISC_df

@@ -392,6 +392,7 @@ class CanonicalCorrelationAnalysis:
         assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
         corr_match_eeg = []
         corr_mismatch_eeg = []
+        corr_match_mm = []
         for idx in range(0, nb_folds):
             if self.mask_list is not None:
                 [EEG_train, Sti_train, self.mask_train], [EEG_test, Sti_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
@@ -408,20 +409,27 @@ class CanonicalCorrelationAnalysis:
                 start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
                 EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
                 Match_trans_trials = utils.into_trials(Sti_trans, self.fs, trial_len, start_points=start_points)
-                Mismatch_trans_trials = [utils.select_distractors(Sti_trans, self.fs, trial_len, start_point) for start_point in start_points]
+                Match_trials = utils.into_trials(Sti_test, self.fs, trial_len, start_points=start_points)
+                Mismatch_trials_pair = [utils.select_distractors([Sti_trans, Sti_test], self.fs, trial_len, start_point) for start_point in start_points]
+                Mismatch_trans_trials = [MM[0] for MM in Mismatch_trials_pair]
+                Mismatch_trials = [MM[1] for MM in Mismatch_trials_pair]
                 corr_match_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Match_trans_trials)])
                 corr_mismatch_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Mismatch_trans_trials)])
+                corr_match_mm_i = np.stack([pearsonr(np.squeeze(M), np.squeeze(MM))[0] for M, MM in zip(Match_trials, Mismatch_trials)])
                 corr_match_eeg.append(corr_match_eeg_i)
                 corr_mismatch_eeg.append(corr_mismatch_eeg_i)
+                corr_match_mm.append(corr_match_mm_i)
             else:
                 print('The length of the video is too short for the given trial length.')
                 # return NaN values
                 corr_match_eeg.append(np.full((1, self.n_components), np.nan))
                 corr_mismatch_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_match_mm.append(np.nan)
         
         corr_match_eeg = np.concatenate(tuple(corr_match_eeg), axis=0)
         corr_mismatch_eeg = np.concatenate(tuple(corr_mismatch_eeg), axis=0)
-        return corr_match_eeg, corr_mismatch_eeg
+        corr_match_mm = np.concatenate(tuple(corr_match_mm), axis=0)
+        return corr_match_eeg, corr_mismatch_eeg, corr_match_mm
 
     def att_or_unatt_LVO(self, feat_unatt_list, TRAIN_WITH_ATT, V_eeg=None, V_Stim=None, EEG_ori_list=None, COMBINE_ATT_UNATT=False):
         '''
@@ -514,6 +522,7 @@ class CanonicalCorrelationAnalysis:
         assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
         corr_att_eeg = []
         corr_unatt_eeg = []
+        corr_att_unatt = []
         for idx in range(0, nb_folds):
             if self.mask_list is not None:
                 [EEG_train, Att_train, Unatt_train, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
@@ -541,18 +550,88 @@ class CanonicalCorrelationAnalysis:
                 EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
                 Att_trans_trials = utils.into_trials(Att_trans, self.fs, trial_len, start_points=start_points)
                 Unatt_trans_trials = utils.into_trials(Unatt_trans, self.fs, trial_len, start_points=start_points)
+                Att_trials = utils.into_trials(Att_test, self.fs, trial_len, start_points=start_points)
+                Unatt_trials = utils.into_trials(Unatt_test, self.fs, trial_len, start_points=start_points)
                 corr_att_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Att_trans_trials)])
                 corr_unatt_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Unatt_trans_trials)])
+                corr_att_unatt_i = np.stack([pearsonr(np.squeeze(Att), np.squeeze(Unatt))[0] if np.squeeze(Att).ndim == 1 else np.nan for Att, Unatt in zip(Att_trials, Unatt_trials)])
                 corr_att_eeg.append(corr_att_eeg_i)
                 corr_unatt_eeg.append(corr_unatt_eeg_i)
+                corr_att_unatt.append(corr_att_unatt_i)
             else:
                 print('The length of the video is too short for the given trial length.')
                 # return NaN values
                 corr_att_eeg.append(np.full((1, self.n_components), np.nan))
                 corr_unatt_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_att_unatt.append(np.nan)
         corr_att_eeg = np.concatenate(tuple(corr_att_eeg), axis=0)
         corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
-        return corr_att_eeg, corr_unatt_eeg
+        corr_att_unatt = np.concatenate(tuple(corr_att_unatt), axis=0)
+        return corr_att_eeg, corr_unatt_eeg, corr_att_unatt
+
+    def VAD_MM_LVO(self, feat_unatt_list, trial_len, V_eeg=None, V_Stim=None):
+        '''
+        Visual attention decoding task with leave-one-pair-out
+        Always train on attended data and try to decode the attended object
+        '''
+        feat_att_list = self.Stim_list
+        nb_videos = len(feat_att_list)
+        nb_folds = nb_videos//self.leave_out
+        assert nb_videos%self.leave_out == 0, "The number of videos should be a multiple of the leave_out parameter."
+        nested_datalist = [self.EEG_list, feat_att_list, feat_unatt_list, self.mask_list] if self.mask_list is not None else [self.EEG_list, feat_att_list, feat_unatt_list]
+        train_list_folds, test_list_folds = utils.split_multi_mod_LVO(nested_datalist, self.leave_out)
+        assert len(train_list_folds) == len(test_list_folds) == nb_folds, "The number of folds is not correct."
+        corr_att_eeg = []
+        corr_unatt_eeg = []
+        corr_mismatch_eeg = []
+        corr_att_unatt = []
+        corr_att_mismatch = []
+        for idx in range(0, nb_folds):
+            if self.mask_list is not None:
+                [EEG_train, Att_train, _, self.mask_train], [EEG_test, Att_test, Unatt_test, self.mask_test] = train_list_folds[idx], test_list_folds[idx]
+            else:
+                [EEG_train,  Att_train, _], [EEG_test, Att_test, Unatt_test] = train_list_folds[idx], test_list_folds[idx]
+            if V_eeg is None:
+                _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
+            else:
+                 V_eeg_train, V_feat_train = V_eeg, V_Stim
+            EEG_trans, Att_trans = self.get_transformed_data(EEG_test, Att_test, V_eeg_train, V_feat_train)
+            _, Unatt_trans = self.get_transformed_data(EEG_test, Unatt_test, V_eeg_train, V_feat_train)
+            if EEG_trans.shape[0]-trial_len*self.fs >= 0:
+                nb_trials = EEG_trans.shape[0]//self.fs * 2
+                start_points = np.random.randint(0, EEG_trans.shape[0]-trial_len*self.fs, size=nb_trials)
+                EEG_trans_trials = utils.into_trials(EEG_trans, self.fs, trial_len, start_points=start_points)
+                Att_trans_trials = utils.into_trials(Att_trans, self.fs, trial_len, start_points=start_points)
+                Unatt_trans_trials = utils.into_trials(Unatt_trans, self.fs, trial_len, start_points=start_points)
+                Mismatch_trials_pair = [utils.select_distractors([Att_trans, Att_test], self.fs, trial_len, start_point) for start_point in start_points]
+                Mismatch_trans_trials = [MM[0] for MM in Mismatch_trials_pair]
+                Mismatch_trials = [MM[1] for MM in Mismatch_trials_pair]
+                Att_trials = utils.into_trials(Att_test, self.fs, trial_len, start_points=start_points)
+                Unatt_trials = utils.into_trials(Unatt_test, self.fs, trial_len, start_points=start_points)
+                corr_att_eeg_i = np.stack([self.get_corr_coe(EEG, Att)[0] for EEG, Att in zip(EEG_trans_trials, Att_trans_trials)])
+                corr_unatt_eeg_i = np.stack([self.get_corr_coe(EEG, Unatt)[0] for EEG, Unatt in zip(EEG_trans_trials, Unatt_trans_trials)])
+                corr_mismatch_eeg_i = np.stack([self.get_corr_coe(EEG, MM)[0] for EEG, MM in zip(EEG_trans_trials, Mismatch_trans_trials)])
+                corr_att_unatt_i = np.stack([pearsonr(np.squeeze(Att), np.squeeze(Unatt))[0] if np.squeeze(Att).ndim == 1 else np.nan for Att, Unatt in zip(Att_trials, Unatt_trials)])
+                corr_att_mismatch_i = np.stack([pearsonr(np.squeeze(Att), np.squeeze(MM))[0] if np.squeeze(Att).ndim == 1 else np.nan for Att, MM in zip(Att_trials, Mismatch_trials)])
+                corr_att_eeg.append(corr_att_eeg_i)
+                corr_unatt_eeg.append(corr_unatt_eeg_i)
+                corr_mismatch_eeg.append(corr_mismatch_eeg_i)
+                corr_att_unatt.append(corr_att_unatt_i)
+                corr_att_mismatch.append(corr_att_mismatch_i)
+            else:
+                print('The length of the video is too short for the given trial length.')
+                # return NaN values
+                corr_att_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_unatt_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_mismatch_eeg.append(np.full((1, self.n_components), np.nan))
+                corr_att_unatt.append(np.nan)
+                corr_att_mismatch.append(np.nan)
+        corr_att_eeg = np.concatenate(tuple(corr_att_eeg), axis=0)
+        corr_unatt_eeg = np.concatenate(tuple(corr_unatt_eeg), axis=0)
+        corr_mismatch_eeg = np.concatenate(tuple(corr_mismatch_eeg), axis=0)
+        corr_att_unatt = np.concatenate(tuple(corr_att_unatt), axis=0)
+        corr_att_mismatch = np.concatenate(tuple(corr_att_mismatch), axis=0)
+        return corr_att_eeg, corr_unatt_eeg, corr_mismatch_eeg, corr_att_unatt, corr_att_mismatch
 
     def att_or_unatt_aug(self, aug_data_list, aug_feat_att_list, aug_mask_list, feat_unatt_list, trial_len=None, BOOTSTRAP=True):
         '''
