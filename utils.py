@@ -113,6 +113,32 @@ def regress_out(X, Y):
     return X_res
 
 
+def regress_out_2D_pair(X, Y, C):
+    '''
+    Regress out C from both X and Y
+    '''
+    if np.ndim(X) == 1:
+        X = np.expand_dims(X, axis=1)
+    if np.ndim(Y) == 1:
+        Y = np.expand_dims(Y, axis=1)
+    X_res = regress_out(X, C)
+    Y_res = regress_out(Y, C)
+    return X_res, Y_res
+
+
+def regress_out_2D_pair_trials(X_trials, Y_trials, C_trials):
+    '''
+    Regress out C from both X and Y
+    '''
+    X_res_trials = []
+    Y_res_trials = []
+    for X, Y, C in zip(X_trials, Y_trials, C_trials):
+        X_res, Y_res = regress_out_2D_pair(X, Y, C)
+        X_res_trials.append(X_res)
+        Y_res_trials.append(Y_res)
+    return X_res_trials, Y_res_trials
+
+
 def further_regress_out(data_3D, confound_3D, L_d, L_c, offset_d, offset_c):
     N = data_3D.shape[2]
     data_clean_list = []
@@ -1177,7 +1203,7 @@ def add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj, GAZEFEAT
     return eeg_multisubj_list, eog_multisubj_list, data['feat_att_list'], data['feat_unatt_list'], gaze_multisubj_list, data['fs'], data['len_seg_list']
 
 
-def remove_shot_cuts(data, fs, time_points=None, remove_time=1):
+def remove_shot_cuts_and_center(data, fs, time_points=None, remove_time=1):
     T = data.shape[0]
     if time_points is None:
         time_points = [0, T]
