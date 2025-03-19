@@ -272,10 +272,10 @@ class CanonicalCorrelationAnalysis:
         if T-trial_len*self.fs >= 0:
             if given_start_points is None:
                 if BOOTSTRAP:
-                    nb_trials = min(T//self.fs * 2, 1000)
+                    nb_trials = min(T//self.fs//3, 1000)
                     start_points = np.random.randint(0, T-trial_len*self.fs, size=nb_trials)
                 else:
-                    start_points = None
+                    start_points = np.array(range(0, T - T%(self.fs*trial_len), self.fs*trial_len))
             else:
                 start_points = given_start_points
             X_trials = utils.into_trials(X, self.fs, trial_len, start_points=start_points)
@@ -292,31 +292,38 @@ class CanonicalCorrelationAnalysis:
             corr_att_compete_trials = np.nan
         return corr_att_trials, corr_compete_trials, corr_att_compete_trials, start_points
 
-    def cal_corr_compete_trials_mask(self, X, Y_att, Y_unatt, V_X, V_Y, BOOTSTRAP, trial_len=None):
+    def cal_corr_compete_trials_mask(self, X, Y_att, V_X, V_Y, BOOTSTRAP, trial_len, Y_unatt=None, given_start_points=None):
         '''
         This function versus previous function:
         Must use this one if data need to be masked beforehand (then `get_transformed_data` should be called first)
         '''
         X_trans, Y_att_trans = self.get_transformed_data(X, Y_att, V_X, V_Y)
-        _, Y_unatt_trans = self.get_transformed_data(X, Y_unatt, V_X, V_Y)
+        _, Y_unatt_trans = self.get_transformed_data(X, Y_unatt, V_X, V_Y) if Y_unatt is not None else [None, None]
         T = X_trans.shape[0]
         if T-trial_len*self.fs >= 0:
-            if BOOTSTRAP:
-                nb_trials = min(T//self.fs * 2, 1000)
-                start_points = np.random.randint(0, T-trial_len*self.fs, size=nb_trials)
+            if given_start_points is None:
+                if BOOTSTRAP:
+                    nb_trials = min(T//self.fs//3, 1000)
+                    start_points = np.random.randint(0, T-trial_len*self.fs, size=nb_trials)
+                else:
+                    start_points = np.array(range(0, T - T%(self.fs*trial_len), self.fs*trial_len))
             else:
-                start_points = None
+                start_points = given_start_points
+            Y_att_trials = utils.into_trials(Y_att, self.fs, trial_len, start_points=start_points)
+            Y_compete_trials = utils.into_trials(Y_unatt, self.fs, trial_len, start_points=start_points) if Y_unatt is not None else [utils.select_distractors([Y_att], self.fs, trial_len, start_point)[0] for start_point in start_points]
+            corr_att_compete_trials = np.stack([pearsonr(Att[:,0], Compete[:,0])[0] for Att, Compete in zip(Y_att_trials, Y_compete_trials)])
             # Note: the data has been transformed
-            X_trials = utils.into_trials(X_trans, self.fs, trial_len, start_points=start_points)
-            Y_att_trials = utils.into_trials(Y_att_trans, self.fs, trial_len, start_points=start_points)
-            Y_unatt_trials = utils.into_trials(Y_unatt_trans, self.fs, trial_len, start_points=start_points) 
-            corr_att_trials = self.cal_corr_coe_trials(X_trials, Y_att_trials, avg=False)[0]
-            corr_unatt_trials = self.cal_corr_coe_trials(X_trials, Y_unatt_trials, avg=False)[0]
+            X_trans_trials = utils.into_trials(X_trans, self.fs, trial_len, start_points=start_points)
+            Y_att_trans_trials = utils.into_trials(Y_att_trans, self.fs, trial_len, start_points=start_points)
+            Y_compete_trans_trials = utils.into_trials(Y_unatt_trans, self.fs, trial_len, start_points=start_points) if Y_unatt_trans is not None else [utils.select_distractors([Y_att_trans], self.fs, trial_len, start_point)[0] for start_point in start_points]
+            corr_att_trials = self.cal_corr_coe_trials(X_trans_trials, Y_att_trans_trials, avg=False)[0]
+            corr_compete_trials = self.cal_corr_coe_trials(X_trans_trials, Y_compete_trans_trials, avg=False)[0]
         else:
             print('The length of the video is too short for the given trial length.')
             corr_att_trials = np.full((1, self.n_components), np.nan)
-            corr_unatt_trials = np.full((1, self.n_components), np.nan)
-        return corr_att_trials, corr_unatt_trials
+            corr_compete_trials = np.full((1, self.n_components), np.nan)
+            corr_att_compete_trials = np.nan
+        return corr_att_trials, corr_compete_trials, corr_att_compete_trials, start_points
 
     def permutation_test(self, X, Y, V_A, V_B, PHASE_SCRAMBLE=True, block_len=None, X_trans=None, Y_trans=None, C=None):
         '''
@@ -424,7 +431,7 @@ class CanonicalCorrelationAnalysis:
                 _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Sti_train)
             else:
                 V_eeg_train, V_feat_train = V_eeg, V_Stim
-            corr_match_eeg_i, corr_mismatch_eeg_i, corr_match_mm_i, _ = self.cal_corr_compete_trials(EEG_test, Sti_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len) 
+            corr_match_eeg_i, corr_mismatch_eeg_i, corr_match_mm_i, _ = self.cal_corr_compete_trials(EEG_test, Sti_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len) if self.REGFEATS else self.cal_corr_compete_trials_mask(EEG_test, Sti_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
             corr_match_eeg.append(corr_match_eeg_i)
             corr_mismatch_eeg.append(corr_mismatch_eeg_i)
             corr_match_mm.append(corr_match_mm_i)
@@ -541,7 +548,7 @@ class CanonicalCorrelationAnalysis:
                         _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
             else:
                  V_eeg_train, V_feat_train = V_eeg, V_Stim
-            corr_att_eeg_i, corr_unatt_eeg_i, corr_att_unatt_i, _ = self.cal_corr_compete_trials(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test) 
+            corr_att_eeg_i, corr_unatt_eeg_i, corr_att_unatt_i, _ = self.cal_corr_compete_trials(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test) if self.REGFEATS else self.cal_corr_compete_trials_mask(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test)
             corr_att_eeg.append(corr_att_eeg_i)
             corr_unatt_eeg.append(corr_unatt_eeg_i)
             corr_att_unatt.append(corr_att_unatt_i)
@@ -577,8 +584,8 @@ class CanonicalCorrelationAnalysis:
                 _, _, _, _, V_eeg_train, V_feat_train, _ = self.fit(EEG_train, Att_train)
             else:
                  V_eeg_train, V_feat_train = V_eeg, V_Stim
-            corr_att_eeg_vad_i, corr_unatt_eeg_i, corr_att_unatt_i, start_points = self.cal_corr_compete_trials(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test) 
-            corr_att_eeg_mm_i, corr_mismatch_eeg_i, corr_att_mm_i, _ = self.cal_corr_compete_trials(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, given_start_points=start_points)
+            corr_att_eeg_vad_i, corr_unatt_eeg_i, corr_att_unatt_i, start_points = self.cal_corr_compete_trials(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test) if self.REGFEATS else self.cal_corr_compete_trials_mask(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test)
+            corr_att_eeg_mm_i, corr_mismatch_eeg_i, corr_att_mm_i, _ = self.cal_corr_compete_trials(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, given_start_points=start_points) if self.REGFEATS else self.cal_corr_compete_trials_mask(EEG_test, Att_test, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, given_start_points=start_points)
             corr_att_eeg_vad.append(corr_att_eeg_vad_i)
             corr_unatt_eeg.append(corr_unatt_eeg_i)
             corr_att_unatt.append(corr_att_unatt_i)
@@ -622,7 +629,7 @@ class CanonicalCorrelationAnalysis:
             Att_test_subj = test_att_feat[:,:,subj] if test_att_feat.ndim == 3 else test_att_feat
             Unatt_test_subj = test_unatt_feat[:,:,subj] if test_unatt_feat.ndim == 3 else test_unatt_feat
             self.mask_test = test_mask[:,:,subj]
-            corr_att_trials, corr_unatt_trials = self.cal_corr_compete_trials_mask(EEG_test_subj, Att_test_subj, Unatt_test_subj, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len)
+            corr_att_trials, corr_unatt_trials, _, _ = self.cal_corr_compete_trials_mask(EEG_test_subj, Att_test_subj, V_eeg_train, V_feat_train, BOOTSTRAP, trial_len, Y_unatt=Unatt_test_subj)
             # change the values of the dictionaries
             corr_att_eeg[subj] = corr_att_trials if corr_att_eeg[subj] is None else np.concatenate((corr_att_eeg[subj], corr_att_trials), axis=0)
             corr_unatt_eeg[subj] = corr_unatt_trials if corr_unatt_eeg[subj] is None else np.concatenate((corr_unatt_eeg[subj], corr_unatt_trials), axis=0)
@@ -767,10 +774,10 @@ class DiscriminativeCCA:
             Xs_trans, Xc_trans, Xy_trans = self.get_transformed_data(signal_test, compete_test, target_test, Ws, Ws, Wy)
             if Xs_trans.shape[0]-trial_len*self.fs >= 0:
                 if BOOTSTRAP:
-                    nb_trials = Xs_trans.shape[0]//self.fs * 2
+                    nb_trials = Xs_trans.shape[0]//self.fs//3
                     start_points = np.random.randint(0, Xs_trans.shape[0]-trial_len*self.fs, size=nb_trials)
                 else:
-                    start_points = None
+                    start_points = np.array(range(0, Xs_trans.shape[0] - Xs_trans.shape[0]%(self.fs*trial_len), self.fs*trial_len))
                 Xy_trans_trials = utils.into_trials(Xy_trans, self.fs, trial_len, start_points=start_points)
                 Xs_trans_trials = utils.into_trials(Xs_trans, self.fs, trial_len, start_points=start_points)
                 Xc_trans_trials = utils.into_trials(Xc_trans, self.fs, trial_len, start_points=start_points)
@@ -1297,7 +1304,7 @@ class GeneralizedCCA_MultiMod:
             W_list, _, _ = self.fit(data_mm_train+[Att_train])
 
             if Att_test.shape[0]-trial_len*self.fs >= 0:
-                nb_trials = Att_test.shape[0]//self.fs * 2
+                nb_trials = Att_test.shape[0]//self.fs//3
                 start_points = np.random.randint(0, Att_test.shape[0]-trial_len*self.fs, size=nb_trials)
                 data_mm_trials = [utils.into_trials(data, self.fs, trial_len, start_points=start_points) for data in data_mm_test]
                 Att_trials = utils.into_trials(Att_test, self.fs, trial_len, start_points=start_points)
@@ -1744,10 +1751,10 @@ class GCCAPreprocessedCCA:
         dim_subspace = 2
         if X_trans.shape[0]-trial_len*self.fs >= 0:
             if BOOTSTRAP:
-                nb_trials = min(X_trans.shape[0]//self.fs * 2, 1000)
+                nb_trials = min(X_trans.shape[0]//self.fs//3, 1000)
                 start_points = np.random.randint(0, X_trans.shape[0]-trial_len*self.fs, size=nb_trials)
             else:
-                start_points = None
+                start_points = np.array(range(0, X_trans.shape[0] - X_trans.shape[0]%(self.fs*trial_len), self.fs*trial_len))
             X_trials = utils.into_trials(X_trans, self.fs, trial_len, start_points=start_points)
             Y_att_trials = utils.into_trials(Y_att_trans, self.fs, trial_len, start_points=start_points)
             Y_unatt_trials = utils.into_trials(Y_unatt_trans, self.fs, trial_len, start_points=start_points)

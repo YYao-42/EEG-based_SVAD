@@ -426,6 +426,7 @@ def into_trials(data, fs, t=60, start_points=None):
 
 def select_distractors(data_list, fs, t, start_point):
     assert all(data.shape[0] == data_list[0].shape[0] for data in data_list)
+    data_list = [np.expand_dims(data, axis=1) if np.ndim(data)==1 else data for data in data_list]
     adjacent_start = max(start_point - fs, 0)
     adjacent_end = min(start_point + (t+1)*fs, data_list[0].shape[0])
     # remove the target trial from the data
@@ -593,7 +594,7 @@ def eval_mm(corr_match_fold, corr_mismatch_fold, nb_comp_into_account=2):
     return acc, p_value, acc_sig
 
 
-def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_account=2):
+def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_account=2, message=True):
     # Remove rows where any value is NaN (because the trial length is too long for some folds/subjects)
     idx_not_nan = ~np.isnan(corr_att_fold).any(axis=1)
     corr_att_fold = corr_att_fold[idx_not_nan,:]
@@ -601,8 +602,6 @@ def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_ac
     nb_test = corr_att_fold.shape[0]
     corr_att_cv = np.mean(corr_att_fold, axis=0)
     corr_unatt_cv = np.mean(corr_unatt_fold, axis=0)
-    print('Mean corr with attended features across trials and folds: ', corr_att_cv)
-    print('Mean corr with unattended features across trials and folds: ', corr_unatt_cv)
     corr_att_fold = np.array([np.sort(row)[::-1] for row in corr_att_fold])
     corr_unatt_fold = np.array([np.sort(row)[::-1] for row in corr_unatt_fold])
     nb_correct = sum(corr_att_fold[:,:nb_comp_into_account].sum(axis=1)>corr_unatt_fold[:,:nb_comp_into_account].sum(axis=1))
@@ -611,7 +610,10 @@ def eval_compete(corr_att_fold, corr_unatt_fold, TRAIN_WITH_ATT, nb_comp_into_ac
     acc = nb_correct/nb_test
     p_value = binomtest(nb_correct, nb_test, alternative='greater').pvalue
     acc_sig = sig_level_binomial_test(0.05, nb_test)
-    print('Accuracy: ', acc, ' p-value: ', p_value, 'Number of tests: ', nb_test)
+    if message:
+        print('Mean corr with attended features across trials and folds: ', corr_att_cv)
+        print('Mean corr with unattended features across trials and folds: ', corr_unatt_cv)
+        print('Accuracy: ', acc, ' p-value: ', p_value, 'Number of tests: ', nb_test)
     return acc, p_value, acc_sig, corr_att_cv, corr_unatt_cv
 
 
@@ -1128,7 +1130,7 @@ def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, G
             gaze = get_gaze(eeg_folder + gaze_file[0], len_seg_list[-1], offset)
             gaze = np.expand_dims(gaze, axis=2)
         else:
-            gaze = np.zeros((len_seg_list[-1], 2, 1))
+            gaze = np.zeros((len_seg_list[-1], 4, 1))
         gaze_list.append(gaze)
     if feats_path_folder is not None:
         feat_att_list = []

@@ -84,11 +84,11 @@ def pipe_vad(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_
         acc, _, _, _, _= utils.eval_compete(corr_att_eeg, corr_unatt_eeg, TRAIN_WITH_ATT=True, nb_comp_into_account=nb_comp_into_account)
         res.append(acc)
     train_type = 'SO' if V_eeg is not None else 'Att'
-    table_name = table_dir + f'{feat_name}_SVAD_Indpd_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}.csv'
+    table_name = f"{table_dir}{feat_name}_SVAD_Indpd_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE)
 
 
-def pipe_mm(Subj_ID, eeg_multisubj_list, feat_match_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, MATCHATT, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, SINGLEOBJ=False, feat_name='ObjFlow', REGFEATS=False):
+def pipe_mm(Subj_ID, eeg_multisubj_list, feat_match_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, MATCHATT, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, SINGLEOBJ=False, feat_name='ObjFlow', REGFEATS=False, BOOTSTRAP=True):
     '''
     TASK: Determine the matched feature from a random feature sampled from a different time point using CCA and evaluate the performance
     '''
@@ -104,18 +104,18 @@ def pipe_mm(Subj_ID, eeg_multisubj_list, feat_match_list, fs, L_EEG, L_Stim, off
     CCA = algo.CanonicalCorrelationAnalysis(eeg_onesubj_list, feat_match_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, dim_list_EEG=dim_list_EEG, dim_list_Stim=dim_list_Stim, n_components=n_components, mask_list=mask_list, REGFEATS=REGFEATS, signifi_level=signifi_level, message=message)
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
-        corr_match_eeg, corr_mismatch_eeg, _ = CCA.match_mismatch_LVO(trial_len=trial_len, V_eeg=V_eeg, V_Stim=V_Stim)
+        corr_match_eeg, corr_mismatch_eeg, _ = CCA.match_mismatch_LVO(trial_len=trial_len, V_eeg=V_eeg, V_Stim=V_Stim, BOOTSTRAP=BOOTSTRAP)
         acc, _, _ = utils.eval_mm(corr_match_eeg, corr_mismatch_eeg, nb_comp_into_account)
         res.append(acc)
     if SINGLEOBJ:
         table_name = table_dir + f'{feat_name}_MM_SO_Mask_{ifmask}.csv'
     else:
         train_type = 'SO' if V_eeg is not None else 'Att' if MATCHATT else 'Unatt'
-        table_name = table_dir + f'{feat_name}_MM_Indpd_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}.csv'
+        table_name = f"{table_dir}{feat_name}_MM_Indpd_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE)
 
 
-def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, feat_name='ObjFlow', REGFEATS=False, SAVECORR=False):
+def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, feat_name='ObjFlow', REGFEATS=False, SAVECORR=False, BOOTSTRAP=True):
     res_vad = []
     res_mm = []
     eeg_onesubj_list = [eeg[:,:,Subj_ID] for eeg in eeg_multisubj_list]
@@ -130,7 +130,7 @@ def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs,
     CCA = algo.CanonicalCorrelationAnalysis(eeg_onesubj_list, feat_att_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, dim_list_EEG=dim_list_EEG, dim_list_Stim=dim_list_Stim, n_components=n_components, REGFEATS=REGFEATS, mask_list=mask_list, signifi_level=signifi_level, message=message)
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
-        corr_att_eeg_vad, corr_unatt_eeg, corr_att_unatt, corr_att_eeg_mm, corr_mismatch_eeg, corr_att_mismatch = CCA.VAD_MM_LVO(feat_unatt_list, trial_len, V_eeg=V_eeg, V_Stim=V_Stim)
+        corr_att_eeg_vad, corr_unatt_eeg, corr_att_unatt, corr_att_eeg_mm, corr_mismatch_eeg, corr_att_mismatch = CCA.VAD_MM_LVO(feat_unatt_list, trial_len, V_eeg=V_eeg, V_Stim=V_Stim, BOOTSTRAP=BOOTSTRAP)
         acc_vad, _, _, _, _= utils.eval_compete(corr_att_eeg_vad, corr_unatt_eeg, TRAIN_WITH_ATT=True, nb_comp_into_account=nb_comp_into_account)
         acc_mm, _, _ = utils.eval_mm(corr_att_eeg_mm, corr_mismatch_eeg, nb_comp_into_account)
         res_vad.append(acc_vad)
@@ -141,9 +141,9 @@ def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs,
             with open(file_name, 'wb') as f:
                 pickle.dump(corr_dict, f)
     train_type = 'SO' if V_eeg is not None else 'Att'
-    table_name = table_dir + f'{feat_name}_SVAD_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}.csv'
+    table_name = f"{table_dir}{feat_name}_SVAD_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res_vad, OVERWRITE)
-    table_name = table_dir + f'{feat_name}_MM_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}.csv'
+    table_name = f"{table_dir}{feat_name}_MM_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res_mm, OVERWRITE)
 
 
@@ -221,7 +221,7 @@ def pipe_saccade(nested_data, nested_aug_data, fs, L_EEG, L_Stim, offset_EEG, of
 
     CCA = algo.CanonicalCorrelationAnalysis(eeg_multisubj_list, feat_att_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, n_components=n_components, REGFEATS=REGFEATS, mask_list=mask_list, leave_out=7)
     res = {Subj_ID: [] for Subj_ID in range(nb_subj)}
-    table_name = table_dir + f'{feat_name}_SVAD_Train_Aug_Multisubj_Syn_{SYNMASK}_REG_{REGFEATS}.csv'
+    table_name = f"{table_dir}{feat_name}_SVAD_Train_Aug_Multisubj_Syn_{SYNMASK}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
         corr_att_eeg, corr_unatt_eeg = CCA.VAD_aug_subj_indpd(eeg_multisubj_list_aug, feat_att_list_aug, mask_list_aug, feat_unatt_list, trial_len, BOOTSTRAP)
