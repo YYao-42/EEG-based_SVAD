@@ -1080,17 +1080,11 @@ def get_features(feats_path_folder, video_id, len_seg, offset=None, smooth=True,
     return feats
 
 
-def get_gaze(gaze_path, len_seg, offset=None):
+def get_gaze(gaze_path):
     gaze = np.load(gaze_path, allow_pickle=True)
     # interpolate missing values
     gaze = np.array([np.nan if x is None else x for x in gaze])
     gaze_clean = clean_features(gaze.astype(np.float64), smooth=False)
-    if offset is not None:
-        end_idx = min(offset + len_seg, gaze_clean.shape[0])
-        start_idx = end_idx - len_seg
-        gaze_clean = gaze_clean[start_idx:end_idx, :]
-    else:
-        gaze_clean = gaze_clean[:len_seg, :]
     return gaze_clean
 
 
@@ -1124,13 +1118,9 @@ def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, G
         eog_list.append(eog_downsampled)
         len_seg_list.append(eeg_downsampled.shape[0])
         id_att = file[:-4].split('_')[-1]
-        gaze_file = [file for file in os.listdir(eeg_folder) if file.endswith('.npy') and file.split('_')[-2]==id_att]
-        if len(gaze_file) == 1:
-            offset = 122 * fsStim if not singleobj else None
-            gaze = get_gaze(eeg_folder + gaze_file[0], len_seg_list[-1], offset)
-            gaze = np.expand_dims(gaze, axis=2)
-        else:
-            gaze = np.zeros((len_seg_list[-1], 4, 1))
+        gaze_file = file.replace('.set', '_gaze.npy')
+        gaze = get_gaze(eeg_folder + gaze_file)
+        gaze = np.expand_dims(gaze, axis=2)
         gaze_list.append(gaze)
     if feats_path_folder is not None:
         feat_att_list = []
