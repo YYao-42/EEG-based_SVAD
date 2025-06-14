@@ -1,13 +1,13 @@
-# Identifying Temporal Correlations Between Natural Single-shot Videos and EEG Signals
+# EEG-based Decoding of Selective Visual Attention in Superimposed Videos
 
-This repository includes the Python code for the paper "Identifying Temporal Correlations Between Natural Single-shot Videos and EEG Signals" [1].
+This repository includes the Python code for the paper "EEG-based Decoding of Selective Visual Attention in Superimposed Videos." [1].
 
-Please run the jupyter notebooks (Shot_cuts.ipynb and One_shot.ipynb) to reproduce the results. The used algorithms are implemented in algo.py. 
+Please run the jupyter notebook main.ipynb to reproduce the results. The used algorithms are implemented in algo.py. 
 
 To do: provide the link to the dataset.
 
 
 **Reference:**
 
-[1] Yao, Y., Stebner, A., Tuytelaars, T., Geirnaert, S., & Bertrand, A. (2023). Identifying Temporal Correlations Between Natural Single-shot Videos and EEG Signals. bioRxiv. doi:10.1101/2023.09.19.558394
+[1] Yao, Y., De Swaef, W., Geirnaert, S., & Bertrand, A. (2024). EEG-based Decoding of Selective Visual Attention in Superimposed Videos. arXiv preprint arXiv:2409.12562.
 
