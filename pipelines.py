@@ -51,7 +51,7 @@ def pipe_corr_att_or_unatt(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unat
         utils.save_corr_df(table_name, sig_corr_pool, corr_att_fold, corr_unatt_fold, Subj_ID, OVERWRITE)
 
 
-def pipe_vad(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, BOOTSTRAP=True, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, feat_name='ObjFlow', COMBINE_ATT_UNATT=False, REGFEATS=False):
+def pipe_vad(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, BOOTSTRAP=True, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, feat_name='ObjFlow', COMBINE_ATT_UNATT=False, REGFEATS=False, PERMU_TEST=False):
     '''
     TASK: Determine the attended feature from the unattended feature using CCA and evaluate the performance
 
@@ -80,10 +80,15 @@ def pipe_vad(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_
     CCA = algo.CanonicalCorrelationAnalysis(eeg_onesubj_list, feat_att_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, dim_list_EEG=dim_list_EEG, dim_list_Stim=dim_list_Stim, n_components=n_components, mask_list=mask_list, REGFEATS=REGFEATS, signifi_level=signifi_level, message=message)
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
-        corr_att_eeg, corr_unatt_eeg, _ = CCA.visual_attention_decoding_LVO(feat_unatt_list, trial_len=trial_len, BOOTSTRAP=BOOTSTRAP, V_eeg=V_eeg, V_Stim=V_Stim, COMBINE_ATT_UNATT=COMBINE_ATT_UNATT)
+        corr_att_eeg, corr_unatt_eeg, _, acc_permu_list, avgcorr_permu_list = CCA.visual_attention_decoding_LVO(feat_unatt_list, trial_len=trial_len, BOOTSTRAP=BOOTSTRAP, V_eeg=V_eeg, V_Stim=V_Stim, COMBINE_ATT_UNATT=COMBINE_ATT_UNATT, PERMU_TEST=PERMU_TEST)
         acc, _, _, _, _= utils.eval_compete(corr_att_eeg, corr_unatt_eeg, TRAIN_WITH_ATT=True, nb_comp_into_account=nb_comp_into_account)
         res.append(acc)
-    train_type = 'SO' if V_eeg is not None else 'Att'
+        if PERMU_TEST:
+            train_type = 'SO' if V_eeg is not None else 'Att'
+            file_acc_permu = f"{table_dir}{feat_name}_Acc_Permu_Train_{train_type}_Mask_{ifmask}_trial_len{trial_len}.pkl"
+            utils.save_acc_permu(file_acc_permu, Subj_ID, acc_permu_list, OVERWRITE)
+            file_corr_permu = f"{table_dir}{feat_name}_Avgcorr_Permu_Train_{train_type}_Mask_{ifmask}_trial_len{trial_len}.pkl"
+            utils.save_acc_permu(file_acc_permu, Subj_ID, avgcorr_permu_list, OVERWRITE)
     table_name = f"{table_dir}{feat_name}_SVAD_Indpd_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE)
 
@@ -115,7 +120,7 @@ def pipe_mm(Subj_ID, eeg_multisubj_list, feat_match_list, fs, L_EEG, L_Stim, off
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE)
 
 
-def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, feat_name='ObjFlow', REGFEATS=False, SAVECORR=False, BOOTSTRAP=True):
+def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, trial_len_list, table_dir, dim_list_EEG=None, dim_list_Stim=None, saccade_multisubj_list=None, V_eeg=None, V_Stim=None, n_components=3, nb_comp_into_account=2, signifi_level=False, message=True, OVERWRITE=False, feat_name='ObjFlow', REGFEATS=False, SAVECORR=False, BOOTSTRAP=True, PERMU_TEST=False):
     res_vad = []
     res_mm = []
     eeg_onesubj_list = [eeg[:,:,Subj_ID] for eeg in eeg_multisubj_list]
@@ -130,17 +135,22 @@ def pipe_vad_mm(Subj_ID, eeg_multisubj_list, feat_att_list, feat_unatt_list, fs,
     CCA = algo.CanonicalCorrelationAnalysis(eeg_onesubj_list, feat_att_list, fs, L_EEG, L_Stim, offset_EEG, offset_Stim, dim_list_EEG=dim_list_EEG, dim_list_Stim=dim_list_Stim, n_components=n_components, REGFEATS=REGFEATS, mask_list=mask_list, signifi_level=signifi_level, message=message)
     for trial_len in trial_len_list:
         print('Trial length: ', trial_len)
-        corr_att_eeg_vad, corr_unatt_eeg, corr_att_unatt, corr_att_eeg_mm, corr_mismatch_eeg, corr_att_mismatch = CCA.VAD_MM_LVO(feat_unatt_list, trial_len, V_eeg=V_eeg, V_Stim=V_Stim, BOOTSTRAP=BOOTSTRAP)
+        corr_att_eeg_vad, corr_unatt_eeg, corr_att_unatt, corr_att_eeg_mm, corr_mismatch_eeg, corr_att_mismatch, acc_permu_list, avgcorr_permu_list = CCA.VAD_MM_LVO(feat_unatt_list, trial_len, V_eeg=V_eeg, V_Stim=V_Stim, BOOTSTRAP=BOOTSTRAP, PERMU_TEST=PERMU_TEST)
         acc_vad, _, _, _, _= utils.eval_compete(corr_att_eeg_vad, corr_unatt_eeg, TRAIN_WITH_ATT=True, nb_comp_into_account=nb_comp_into_account)
         acc_mm, _, _ = utils.eval_mm(corr_att_eeg_mm, corr_mismatch_eeg, nb_comp_into_account)
         res_vad.append(acc_vad)
         res_mm.append(acc_mm)
         if SAVECORR:
             corr_dict = {'EEG_Att_VAD': corr_att_eeg_vad, 'EEG_Unatt': corr_unatt_eeg, 'EEG_Att_MM': corr_att_eeg_mm, 'EEG_MM':corr_mismatch_eeg, 'Att_Unatt': corr_att_unatt, 'Att_MM': corr_att_mismatch}
-            file_name = table_dir + f'{feat_name}_{Subj_ID}_Corrdict_Len_{trial_len}_REG_{REGFEATS}.pkl'
+            file_name = f"{table_dir}{feat_name}_{Subj_ID}_Corrdict_Len_{trial_len}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.pkl"
             with open(file_name, 'wb') as f:
                 pickle.dump(corr_dict, f)
-    train_type = 'SO' if V_eeg is not None else 'Att'
+        if PERMU_TEST:
+            train_type = 'SO' if V_eeg is not None else 'Att'
+            file_acc_permu = f"{table_dir}{feat_name}_Acc_Permu_Train_{train_type}_Mask_{ifmask}_trial_len{trial_len}.pkl"
+            utils.save_acc_permu(file_acc_permu, Subj_ID, acc_permu_list, OVERWRITE)
+            file_corr_permu = f"{table_dir}{feat_name}_Avgcorr_Permu_Train_{train_type}_Mask_{ifmask}_trial_len{trial_len}.pkl"
+            utils.save_acc_permu(file_corr_permu, Subj_ID, avgcorr_permu_list, OVERWRITE)
     table_name = f"{table_dir}{feat_name}_SVAD_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"
     utils.save_acc_df(table_name, Subj_ID, trial_len_list, res_vad, OVERWRITE)
     table_name = f"{table_dir}{feat_name}_MM_Train_{train_type}_Mask_{ifmask}_REG_{REGFEATS}{'_noBOOTSTRAP' if not BOOTSTRAP else ''}.csv"

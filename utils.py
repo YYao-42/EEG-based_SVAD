@@ -1434,6 +1434,19 @@ def save_acc_df(table_name, Subj_ID, trial_len_list, res, OVERWRITE=False, data_
     with open(table_name, 'w') as f:
         res_df.to_csv(f, header=True, index=False)
 
+def save_acc_permu(file_name, Subj_ID, acc_permu_list, OVERWRITE=False):
+    if not os.path.isfile(file_name):
+        acc_permu_dict = {Subj_ID: acc_permu_list}
+    else:
+        with open(file_name, 'rb') as f:
+            acc_permu_dict = pickle.load(f)
+        if Subj_ID in acc_permu_dict.keys() and not OVERWRITE:
+            print(f"Results for Subj {Subj_ID+1} already exist in {file_name}")
+        else:
+            acc_permu_dict[Subj_ID] = acc_permu_list
+    with open(file_name, 'wb') as f:
+        pickle.dump(acc_permu_dict, f)
+
 # def create_ISC_df(ISC_fold, ISCov_fold, sig_ISC_pool, mod_name):
 #     ISC = np.average(ISC_fold, axis=0)
 #     ISCov = np.average(ISCov_fold, axis=0)
