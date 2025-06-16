@@ -1149,7 +1149,7 @@ def data_per_subj(eeg_folder, fsStim, bads, singleobj, feats_path_folder=None, G
 
 
 def data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, GAZEFEATS, SAVE=True):
-    PATTERN = subj_path[0].split('/')[-3]
+    PATTERN = 'Overlay'
     data_path = 'data/' + PATTERN + '/'
     if not os.path.exists(data_path):
         os.makedirs(data_path)
@@ -1174,7 +1174,7 @@ def data_multi_subj(subj_path, fsStim, bads, singleobj, feats_path_folder, GAZEF
 
 
 def add_new_data(subj_path, fsStim, bads, feats_path_folder, singleobj, GAZEFEATS=False):
-    PATTERN = subj_path[0].split('/')[-3]
+    PATTERN = 'Overlay'
     data_path = 'data/' + PATTERN + '/'
     if not GAZEFEATS:
         file_name = 'data_singleobj.pkl' if singleobj else 'data_twoobj.pkl'
