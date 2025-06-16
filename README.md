@@ -1,10 +1,10 @@
 # EEG-based Decoding of Selective Visual Attention in Superimposed Videos
 
-This repository includes the Python code for the paper "EEG-based Decoding of Selective Visual Attention in Superimposed Videos." [1].
+This repository contains the Python code associated with the paper "EEG-based Decoding of Selective Visual Attention in Superimposed Videos" [1].
 
-Please run the jupyter notebook main.ipynb to reproduce the results. The used algorithms are implemented in algo.py. 
+To reproduce the results, download the features and preprocessed data from [this link](https://drive.google.com/file/d/1snerQuJ60Iysy1xwNAxV7dHAmBu-kpmT/view?usp=sharing), and run the Jupyter notebook main.ipynb. (Make sure to update the paths to the data and features in the notebook if needed.) The algorithms used in the analysis are implemented in algo.py.
 
-To do: provide the link to the dataset.
+The dataset used in this research is publicly available at: https://zenodo.org/records/15665101
 
 
 **Reference:**
